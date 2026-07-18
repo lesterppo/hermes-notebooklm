@@ -1,13 +1,16 @@
 ---
 name: notebooklm-cli
-description: Query NotebookLM notebooks via notebooklm-py. 3-5s latency, multi-turn, inline citations. Use for knowledge extraction from uploaded sources.
-version: 3.1.0
+description: Query NotebookLM (Gemini notebook rebrand) via notebooklm-py. 3-5s latency, multi-turn, inline citations. Use for knowledge extraction from uploaded sources.
+version: 3.2.0
 ---
 
 # NotebookLM CLI (Agent-Native)
 
 Query Google NotebookLM notebooks programmatically. Pure HTTP API (no browser),
 3-5s latency, multi-turn conversations with inline citations.
+
+> Note: Google rebranded NotebookLM as **Gemini notebook**. The product URL
+> (`notebooklm.google.com`) and API are unchanged, so this tool works as-is.
 
 ## Setup (one-time)
 
@@ -54,20 +57,34 @@ Always check `s` field: `"done"` = success, `"err"` = check `e`.
 | `-r` | Raw text output (no JSON wrapper) |
 | `-l` | List all notebooks |
 | `-s ID` | Set default notebook ID |
-| `--clear` | Start fresh conversation |
+| `--new` | Start a fresh conversation (discard current thread) |
+| `--clear` | Clear the current conversation thread |
 | `--src` | List sources in current notebook |
 | `--src ID` | Get source full text by ID |
 | `--guide ID` | Get AI source guide by ID |
+| `--summary` | AI-generated notebook summary (+ `--topics`) |
+| `--metadata` | Notebook metadata + sources list |
+| `--history` | Conversation history (or `--save` as note) |
+| `--note TEXT` | Create a note (`-t TITLE` for title) |
+| `--note-list` | List notes in current notebook |
+| `--artifact` | List generated Studio artifacts |
+| `--gen TYPE [ARGS]` | Generate Studio artifact; forwards ARGS to `notebooklm generate TYPE` (e.g. `--gen report "topic"`, `--gen mind-map --instructions "topic"`) |
+| `--src-add URL/TEXT` | Add a source (URL, file path, or inline text) |
+| `--src-del ID` | Delete a source by ID |
+| `--src-clean` | Auto-remove duplicate/error/stale sources |
+| `--share` | Show notebook sharing status |
+| `--research` | Show Deep Research status for current notebook |
 | `--init` | Refresh auth from browser cookies |
 
 ## Multi-Turn
 
 Conversations persist across calls automatically. Each `ask` continues the
-same thread. Use `--clear` to start a fresh conversation.
+same thread. Use `--new` to start a fresh conversation.
 
 ## Dependencies
 
-- `notebooklm-py` — handles batchexecute API internally
+- `notebooklm-py` — handles batchexecute API internally (verified 0.7.2/0.7.3
+  against the Gemini-notebook rebrand; both target `notebooklm.google.com`)
 - `browser_cookie3` — for cookie extraction (--init only)
 - Firefox or Chrome signed into notebooklm.google.com
 

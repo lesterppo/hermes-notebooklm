@@ -1,7 +1,9 @@
 # Hermes NotebookLM — AI Agent Tools
 
-Token-efficient CLI tools for AI agents to interact with Google NotebookLM.
-Two approaches: page server (v2) and direct HTTP API via notebooklm-py (v3).
+Token-efficient CLI tools for AI agents to interact with Google's NotebookLM
+(rebranded **Gemini notebook** — same product, same `notebooklm.google.com` API;
+no code change required). Two approaches: page server (v2) and direct HTTP API
+via notebooklm-py (v3).
 
 ## Quick Start
 
@@ -45,7 +47,7 @@ Agent should always check `s` field: `"done"` = success, `"err"` = error (check 
 ### Setup for agent
 ```bash
 # One-time:
-pip install --break-system-packages notebooklm-py
+pip install --break-system-packages notebooklm-py   # latest is 0.7.3
 python3 nlm_v3.py --init    # extracts Google cookies from browser
 python3 nlm_v3.py -s NOTEBOOK_ID
 
@@ -55,10 +57,18 @@ echo "question" | python3 nlm_v3.py -p    # plain text
 python3 nlm_v3.py --clear                 # new conversation
 python3 nlm_v3.py --src                   # list sources
 python3 nlm_v3.py --src SOURCE_ID         # get full text
+python3 nlm_v3.py --summary               # AI notebook summary
+python3 nlm_v3.py --metadata              # notebook + sources metadata
+python3 nlm_v3.py --history               # conversation history
+python3 nlm_v3.py --note "text" -t "Title"  # save a note
+python3 nlm_v3.py --artifact              # list generated artifacts
+python3 nlm_v3.py --gen report "topic"    # generate a Studio artifact
 ```
 
 ### Dependencies
-- `notebooklm-py` (pip package, handles batchexecute API internally)
+- `notebooklm-py` (pip package, handles batchexecute API internally) — **0.7.3**
+  verified working against the Gemini-notebook rebrand (still targets
+  `notebooklm.google.com`).
 - `browser_cookie3` (for cookie extraction, --init only)
 - Firefox or Chrome with Google account signed into notebooklm.google.com
 
@@ -106,6 +116,11 @@ python3 nlm_v3.py -l    # list all notebooks
 ```
 
 ## Internal API Notes
+
+NotebookLM was rebranded "Gemini notebook" by Google, but the product URL and
+underlying `batchexecute` RPC API are unchanged — `notebooklm-py` 0.7.3 still
+targets `https://notebooklm.google.com`. No wrapper update is required for the
+rebrand; this repo was verified live against the renamed product on 2026-07-18.
 
 NotebookLM uses Google's batchexecute RPC framework:
 ```
