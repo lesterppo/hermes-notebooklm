@@ -1,144 +1,132 @@
 # Hermes NotebookLM — AI Agent Tools
 
-Token-efficient CLI tools for AI agents to interact with Google's NotebookLM
-(rebranded **Gemini notebook** — same product, same `notebooklm.google.com` API;
-no code change required). Two approaches: page server (v2) and direct HTTP API
-via notebooklm-py (v3).
+Token-efficient CLI tools for AI agents to interact with Google NotebookLM
+(aka **Gemini notebook**). **v4: Pure HTTP API via notebooklm-py. 3-5s latency. 39 commands across 7 groups.**
 
 ## Quick Start
 
 ```bash
-# v3 (recommended — 3-5s, no browser):
-pip install --break-system-packages notebooklm-py
-cp nlm_v3.py ~/.hermes/scripts/nlm.py
-python3 ~/.hermes/scripts/nlm.py --init    # extract browser cookies → auth
-echo "What is pemvidutide?" | python3 ~/.hermes/scripts/nlm.py
+# Install
+pip install notebooklm-py browser_cookie3
 
-# v2 (fallback — page server, 12-25s, needs Playwright):
-python3 nlm_v2_server.py &                 # start daemon on :9874
-echo "question" | python3 nlm_v2.py        # ask via HTTP
+# Auth (one-time)
+notebooklm login
+# OR: python3 nlm_v3.py auth init
+
+# Use
+python3 nlm_v3.py nb list                           # List notebooks
+python3 nlm_v3.py nb use YOUR_NOTEBOOK_ID            # Set active notebook
+python3 nlm_v3.py "What is in this notebook?"        # Ask a question
 ```
+
+## Command Groups
+
+| Group | Alias | Commands |
+|-------|-------|----------|
+| `notebook` | `nb` | list, create, rename, delete, use, status, summary, metadata |
+| `ask` | (shorthand) | question, -p, -n |
+| `source` | `src`, `ls` | list, add, guide, fulltext, get, delete, clean, add-research |
+| `research` | — | status, wait |
+| `artifact` | `art` | list, generate, download, suggestions, get, delete |
+| `note` | `notes` (list) | list, create, get, save, rename, delete |
+| `share` | — | status, public, add, remove, view-level |
+| `history` | — | --limit, --save, --show-all |
+| `configure` | — | --mode, --persona, --response-length |
+| `auth` | — | init, doctor |
+| `clear` | — | (reset conversation) |
+
+### Artifact Types
+`audio`, `video`, `cinematic-video`, `slide-deck`, `infographic`, `mind-map`,
+`data-table`, `quiz`, `flashcards`, `report`
 
 ## Output Format
 
-All tools output token-efficient JSON:
+All commands return JSON with `"s":"ok"` or `"s":"err"`.
+Large answers (>3000 chars) saved to disk with file pointer.
+
 ```json
-{"f": "answer text with [1][2] citations", "s": "done"}
-{"e": "error message", "s": "err"}
+{"s": "ok", "f": "answer text with [1][2] citations"}
+{"s": "ok", "f": "/path/to/file.txt", "n": 5234}
+{"s": "err", "e": "error message"}
 ```
 
-Agent should always check `s` field: `"done"` = success, `"err"` = error (check `e`).
+## Examples
 
-## v3: notebooklm-py Wrapper (Recommended)
-
-| File | Purpose |
-|------|---------|
-| `nlm_v3.py` | Agent-native CLI wrapper around notebooklm-py |
-| `SKILL.md` | Agent skill with invocation patterns |
-
-### Features
-- 3-5s latency (pure HTTP, no browser)
-- Multi-turn conversations (context persists across calls)
-- Inline citations [1][2][3]
-- Source full-text extraction
-- Plain text mode (-p flag strips markdown)
-- Auto-auth from browser cookies (--init)
-
-### Setup for agent
 ```bash
-# One-time:
-pip install --break-system-packages notebooklm-py   # latest is 0.7.3
-python3 nlm_v3.py --init    # extracts Google cookies from browser
-python3 nlm_v3.py -s NOTEBOOK_ID
+# Notebook management
+nlm_v3.py nb list                                    # {"s":"ok","notebooks":[...],"n":15}
+nlm_v3.py nb create "My Research"                   # {"s":"ok","id":"abc123...","title":"My Research"}
+nlm_v3.py nb summary                                 # AI synthesis of all sources
 
-# Usage:
-echo "question" | python3 nlm_v3.py
-echo "question" | python3 nlm_v3.py -p    # plain text
-python3 nlm_v3.py --clear                 # new conversation
-python3 nlm_v3.py --src                   # list sources
-python3 nlm_v3.py --src SOURCE_ID         # get full text
-python3 nlm_v3.py --summary               # AI notebook summary
-python3 nlm_v3.py --metadata              # notebook + sources metadata
-python3 nlm_v3.py --history               # conversation history
-python3 nlm_v3.py --note "text" -t "Title"  # save a note
-python3 nlm_v3.py --artifact              # list generated artifacts
-python3 nlm_v3.py --gen report "topic"    # generate a Studio artifact
+# Chat (multi-turn, 3-5s)
+nlm_v3.py "What are the key findings?"               # Shorthand for ask
+nlm_v3.py ask -p "Summarize in plain text"           # Strip markdown
+nlm_v3.py ask -n OTHER_ID "Question"                 # Ask different notebook
+
+# Source management
+nlm_v3.py src list                                   # {"s":"ok","sources":[...],"n":20}
+nlm_v3.py src guide abc123                           # AI summary + keywords
+nlm_v3.py src add-research "MASH treatments 2026"    # Web search → import
+nlm_v3.py src add-research --mode deep --no-wait "Q" # Deep research
+
+# Artifacts
+nlm_v3.py art list                                   # Generated artifacts
+nlm_v3.py gen slide-deck --instructions "Key points" # Generate slide deck
+nlm_v3.py dl slide-deck -a abc123 --format pdf       # Download as PDF
+nlm_v3.py gen mind-map --instructions "Drug classes" # Generate mind map
+nlm_v3.py gen audio --instructions "Deep dive"       # Generate podcast
+
+# Notes
+nlm_v3.py note create -t "Summary" "Content here"    # Create
+nlm_v3.py notes                                      # List all
+nlm_v3.py note get abc123                            # Read full content
+
+# Sharing
+nlm_v3.py share status                               # {"s":"ok","public":false,"users":[...]}
+nlm_v3.py share public enable                        # Make public
+nlm_v3.py share add user@example.com                 # Share with viewer
+
+# History
+nlm_v3.py history --limit 5                          # Last 5 Q&A turns
+nlm_v3.py history --save                             # Save as note
 ```
 
-### Dependencies
-- `notebooklm-py` (pip package, handles batchexecute API internally) — **0.7.3**
-  verified working against the Gemini-notebook rebrand (still targets
-  `notebooklm.google.com`).
-- `browser_cookie3` (for cookie extraction, --init only)
-- Firefox or Chrome with Google account signed into notebooklm.google.com
+## Architecture
 
-## v2: Page Server (Fallback)
-
-| File | Purpose |
-|------|---------|
-| `nlm_v2_server.py` | Daemonized Chromium page server on :9874 |
-| `nlm_v2.py` | CLI client (HTTP POST to server) |
-
-### Architecture
 ```
-Agent → nlm_v2.py (HTTP) → :9874 (Chromium daemon) → Playwright → NotebookLM
+AI Agent → nlm_v3.py (CLI wrapper) → notebooklm (notebooklm-py) → Google NotebookLM API
 ```
 
-### Setup for agent
-```bash
-# Start server (daemonizes, double-forks):
-python3 nlm_v2_server.py
+- **nlm_v3.py**: Agent-native subcommand wrapper (~930 lines). Token-efficient JSON output, file pointers for large responses, partial ID matching, comprehensive error handling.
+- **notebooklm**: Upstream `notebooklm-py` CLI. Raw table output, interactive prompts. Use directly for exploratory work; use nlm_v3.py for agent automation.
 
-# Health check:
-curl http://127.0.0.1:9874/health
+## Dependencies
 
-# Query:
-echo "question" | python3 nlm_v2.py
-curl -X POST :9874/query -d 'prompt=question'
-
-# Stop:
-curl http://127.0.0.1:9874/stop
-```
-
-### Dependencies
-- `playwright` + `browser_cookie3`
-- Chromium (`playwright install chromium`)
-- Firefox cookies from profile containing Google auth
-
-## Notebook Discovery
-
-Find notebook IDs on the NotebookLM home page URL:
-`https://notebooklm.google.com/notebook/<UUID>`
-
-Or use:
-```bash
-python3 nlm_v3.py -l    # list all notebooks
-```
-
-## Internal API Notes
-
-NotebookLM was rebranded "Gemini notebook" by Google, but the product URL and
-underlying `batchexecute` RPC API are unchanged — `notebooklm-py` 0.7.3 still
-targets `https://notebooklm.google.com`. No wrapper update is required for the
-rebrand; this repo was verified live against the renamed product on 2026-07-18.
-
-NotebookLM uses Google's batchexecute RPC framework:
-```
-POST /_/LabsTailwindUi/data/batchexecute?rpcids=<rpcid>
-```
-Key rpcids: `rLM1Ne` (metadata), `VfAZjd` (answers), `khqZz` (chat history),
-`GenerateFreeFormStreamed` (streaming chat).
-
-Auth requires `SAPISIDHASH` header + per-session CSRF `at` token generated by
-browser JavaScript. The `at` token is cryptographically bound to browser session
-state — cannot be replicated with pure Python requests. This is why v2 uses a
-real browser and v3 uses `notebooklm-py` which reverse-engineered the session
-management.
+- `notebooklm-py` >= 0.7.3 — handles batchexecute API internally
+- `browser_cookie3` — for cookie extraction (auth init only)
+- Firefox or Chrome signed into notebooklm.google.com
 
 ## Pitfalls
 
-- Auth cookies expire ~30 days. Re-run `--init` to refresh.
-- v2: Node.js v24 EPIPE crash — daemon mode (double-fork) prevents this.
-- v2: First query after cold start ~25s (browser init), subsequent ~12s.
-- v3: Multi-turn persists across calls. Use `--clear` for fresh context.
-- v3: Citations reference source numbers, not page numbers.
+- Auth cookies expire ~30 days. Re-run `nlm_v3.py auth init` or `notebooklm login`.
+- `note create` JSON response has `id: null` (upstream bug in notebooklm-py v0.7.3). The note IS created — list notes to get the real ID.
+- `clear` doesn't accept `--notebook` — it operates on current context.
+- Source `fulltext` for image-based PDFs returns Google image URLs, not extracted text. Use AI chat for distilled knowledge.
+- `generate` subcommands take `--instructions`, NOT positional prompt.
+- Partial ID matching works everywhere — `abc` matches `abc123...`.
+- `notebooklm-py` API was not affected by Google's May 2025 NotebookLM → Gemini notebook rebrand.
+
+## Files
+
+| File | Purpose |
+|------|---------|
+| `nlm_v3.py` | Agent-native CLI wrapper (v4, ~930 lines) |
+| `nlm_v2.py` | v2 page-server client (HTTP POST, fallback) |
+| `nlm_v2_server.py` | v2 Chromium daemon (Playwright, fallback) |
+| `README.md` | This file |
+| `SKILL.md` | Hermes agent skill definition |
+
+## Upstream
+
+Uses [notebooklm-py](https://github.com/teng-lin/notebooklm-py) for the HTTP API layer.
+This repo provides the agent-native wrapper with token-efficient output, 7 capability groups, and structured JSON responses.

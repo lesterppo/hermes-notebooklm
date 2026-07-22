@@ -1,96 +1,81 @@
 ---
 name: notebooklm-cli
-description: Query NotebookLM (Gemini notebook rebrand) via notebooklm-py. 3-5s latency, multi-turn, inline citations. Use for knowledge extraction from uploaded sources.
-version: 3.2.0
+description: Query NotebookLM notebooks via nlm.py. 3-5s chat, 39 commands across 7 groups.
+version: 4.0.0
+tags: [notebooklm, knowledge-extraction, agent-native, cli]
+platforms: [linux, wsl]
 ---
 
-# NotebookLM CLI (Agent-Native)
+# NotebookLM CLI (Agent-Native v4)
 
-Query Google NotebookLM notebooks programmatically. Pure HTTP API (no browser),
-3-5s latency, multi-turn conversations with inline citations.
+Token-efficient CLI for Google NotebookLM (Gemini notebook). Pure HTTP API via `notebooklm-py` — no browser, 3-5s latency, 39 commands across 7 capability groups.
 
-> Note: Google rebranded NotebookLM as **Gemini notebook**. The product URL
-> (`notebooklm.google.com`) and API are unchanged, so this tool works as-is.
+**Script:** `nlm_v3.py` (this repo) — agent-native wrapper with structured JSON output.
+**Backend:** `notebooklm-py` (pip package) — reverse-engineered HTTP API client.
 
-## Setup (one-time)
+## Setup
 
 ```bash
-pip install --break-system-packages notebooklm-py
-python3 nlm_v3.py --init    # extract browser cookies → auth storage
-python3 nlm_v3.py -s NOTEBOOK_ID   # set default notebook
+pip install notebooklm-py browser_cookie3
+notebooklm login                    # Interactive browser login
+# OR
+python3 nlm_v3.py auth init         # Extract cookies from existing browser session
 ```
-
-`--init` extracts Google auth cookies from your browser (Firefox or Chrome).
-You must be signed into notebooklm.google.com in that browser first.
 
 ## Invocation
 
 ```bash
-# Ask question (JSON output):
-echo "question" | python3 nlm_v3.py
+# Shorthand — ask current notebook
+nlm_v3.py "Your question here"
 
-# Plain text (no markdown formatting):
-echo "question" | python3 nlm_v3.py -p
+# Explicit ask (multi-turn, conversation persists)
+nlm_v3.py ask -p "Plain text answer"            # Strip markdown
+nlm_v3.py ask -n NOTEBOOK_ID "Question"          # Specific notebook
 
-# Raw text output (no JSON wrapper):
-echo "question" | python3 nlm_v3.py -r
-
-# Argument mode:
-python3 nlm_v3.py "question"
+# All groups use subcommand syntax
+nlm_v3.py <group> <action> [args...]
 ```
+
+## Capability Groups
+
+| Group | Alias | Commands |
+|-------|-------|----------|
+| notebook | nb | list, create, rename, delete, use, status, summary, metadata |
+| ask | (shorthand) | question, -p, -n |
+| source | src, ls | list, add, guide, fulltext, get, delete, clean, add-research |
+| research | — | status, wait |
+| artifact | art | list, generate, download, suggestions, get, delete |
+| note | notes (list) | list, create, get, save, rename, delete |
+| share | — | status, public, add, remove, view-level |
+| history | — | --limit, --save, --show-all |
+| configure | — | --mode, --persona, --response-length |
+| auth | — | init, doctor |
+| clear | — | (reset conversation) |
+
+### Artifact Types
+audio, video, cinematic-video, slide-deck, infographic, mind-map,
+data-table, quiz, flashcards, report
+
+### Download Formats
+pdf, pptx (slide-deck); pdf, pptx, csv, json, markdown (others)
 
 ## Output Format
 
+All commands return JSON with `"s":"ok"` or `"s":"err"`.
+Large answers (>3000 chars) are saved to disk with a file pointer.
+
 ```json
-{"f": "answer text with [1][2] inline citations", "s": "done"}
-{"e": "error message", "s": "err"}
+{"s": "ok", "f": "answer text with [1][2] citations"}
+{"s": "ok", "f": "/path/to/file.txt", "n": 5234}
+{"s": "err", "e": "error message"}
 ```
-
-Always check `s` field: `"done"` = success, `"err"` = check `e`.
-
-## Commands
-
-| Flag | Action |
-|------|--------|
-| (stdin/arg) | Ask notebook (multi-turn, conversation persists) |
-| `-p` | Strip markdown from answer |
-| `-r` | Raw text output (no JSON wrapper) |
-| `-l` | List all notebooks |
-| `-s ID` | Set default notebook ID |
-| `--new` | Start a fresh conversation (discard current thread) |
-| `--clear` | Clear the current conversation thread |
-| `--src` | List sources in current notebook |
-| `--src ID` | Get source full text by ID |
-| `--guide ID` | Get AI source guide by ID |
-| `--summary` | AI-generated notebook summary (+ `--topics`) |
-| `--metadata` | Notebook metadata + sources list |
-| `--history` | Conversation history (or `--save` as note) |
-| `--note TEXT` | Create a note (`-t TITLE` for title) |
-| `--note-list` | List notes in current notebook |
-| `--artifact` | List generated Studio artifacts |
-| `--gen TYPE [ARGS]` | Generate Studio artifact; forwards ARGS to `notebooklm generate TYPE` (e.g. `--gen report "topic"`, `--gen mind-map --instructions "topic"`) |
-| `--src-add URL/TEXT` | Add a source (URL, file path, or inline text) |
-| `--src-del ID` | Delete a source by ID |
-| `--src-clean` | Auto-remove duplicate/error/stale sources |
-| `--share` | Show notebook sharing status |
-| `--research` | Show Deep Research status for current notebook |
-| `--init` | Refresh auth from browser cookies |
-
-## Multi-Turn
-
-Conversations persist across calls automatically. Each `ask` continues the
-same thread. Use `--new` to start a fresh conversation.
-
-## Dependencies
-
-- `notebooklm-py` — handles batchexecute API internally (verified 0.7.2/0.7.3
-  against the Gemini-notebook rebrand; both target `notebooklm.google.com`)
-- `browser_cookie3` — for cookie extraction (--init only)
-- Firefox or Chrome signed into notebooklm.google.com
 
 ## Pitfalls
 
-- Auth cookies expire ~30 days. Re-run `--init`.
-- Citations reference source numbers, not page numbers.
-- Plain mode (-p) strips `**bold**` and `__italic__` but not all markdown.
-- First query after --init may need `notebooklm use <id>` once.
+- **Auth cookies expire ~30 days.** Re-run `nlm_v3.py auth init`.
+- **`note create` JSON has `id: null`** (upstream v0.7.3 bug). Note IS created — list notes for real ID.
+- **`clear` doesn't accept `--notebook`.** Use current context.
+- **Source `fulltext` for image PDFs returns image URLs, not text.** Use AI chat for synthesis.
+- **`generate` takes `--instructions`, not positional prompt.**
+- **Partial ID matching works everywhere.**
+- **Conversation rate limit ~12 comprehensive turns.**
