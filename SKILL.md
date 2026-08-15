@@ -1,14 +1,14 @@
 ---
 name: notebooklm-cli
-description: Query NotebookLM notebooks via nlm.py. 3-5s chat, 39 commands across 7 groups.
-version: 4.0.0
+description: Query NotebookLM notebooks via nlm.py. 3-5s chat, 60+ commands across 11 groups.
+version: 5.0.0
 tags: [notebooklm, knowledge-extraction, agent-native, cli]
 platforms: [linux, wsl]
 ---
 
-# NotebookLM CLI (Agent-Native v4)
+# NotebookLM CLI (Agent-Native v5)
 
-Token-efficient CLI for Google NotebookLM (Gemini notebook). Pure HTTP API via `notebooklm-py` — no browser, 3-5s latency, 39 commands across 7 capability groups.
+Token-efficient CLI for Google NotebookLM (Gemini notebook). Pure HTTP API via `notebooklm-py` 0.8.1 — no browser, 3-5s latency, 60+ commands across 11 capability groups plus 7 passthrough groups.
 
 **Script:** `nlm_v3.py` (this repo) — agent-native wrapper with structured JSON output.
 **Backend:** `notebooklm-py` (pip package) — reverse-engineered HTTP API client.
@@ -16,10 +16,11 @@ Token-efficient CLI for Google NotebookLM (Gemini notebook). Pure HTTP API via `
 ## Setup
 
 ```bash
-pip install notebooklm-py browser_cookie3
-notebooklm login                    # Interactive browser login
+pipx install notebooklm-py
+pipx inject notebooklm-py rookiepy
+notebooklm login --browser-cookies auto --account EMAIL   # cookie auth (no OAuth)
 # OR
-python3 nlm_v3.py auth init         # Extract cookies from existing browser session
+python3 nlm_v3.py auth init --account EMAIL
 ```
 
 ## Invocation
@@ -41,16 +42,20 @@ nlm_v3.py <group> <action> [args...]
 | Group | Alias | Commands |
 |-------|-------|----------|
 | notebook | nb | list, create, rename, delete, use, status, summary, metadata |
-| ask | (shorthand) | question, -p, -n |
-| source | src, ls | list, add, guide, fulltext, get, delete, clean, add-research |
-| research | — | status, wait |
-| artifact | art | list, generate, download, suggestions, get, delete |
+| ask | (shorthand) | question, -p, -n, --new |
+| prompts | prompt | AI-suggested prompts (--mode 1-10, --query) |
+| source | src, ls | list, add, add-drive, add-drive-file, guide, fulltext, get, delete, delete-by-title, clean, add-research, refresh, rename, stale, wait |
+| research | — | status, wait, cancel, import |
+| artifact | art | list, generate, download, suggestions, get, delete, export, get-prompt, poll, rename, retry, wait |
 | note | notes (list) | list, create, get, save, rename, delete |
-| share | — | status, public, add, remove, view-level |
+| share | — | status, public, add, remove, view-level, update |
 | history | — | --limit, --save, --show-all |
 | configure | — | --mode, --persona, --response-length |
 | auth | — | init, doctor |
 | clear | — | (reset conversation) |
+
+**Passthrough groups** (forwarded to upstream): `label`, `collection`, `profile`,
+`language`, `agent`, `skill`, `mcp`.
 
 ### Artifact Types
 audio, video, cinematic-video, slide-deck, infographic, mind-map,
@@ -72,10 +77,16 @@ Large answers (>3000 chars) are saved to disk with a file pointer.
 
 ## Pitfalls
 
-- **Auth cookies expire ~30 days.** Re-run `nlm_v3.py auth init`.
-- **`note create` JSON has `id: null`** (upstream v0.7.3 bug). Note IS created — list notes for real ID.
+- **Auth cookies expire ~30 days.** Re-run `nlm_v3.py auth init --account EMAIL`.
+- **`generate` takes a positional description** for all types EXCEPT `mind-map`,
+  which uses `--instructions` + `--kind [interactive|note-backed]`. `--wait` is
+  only valid on non-mind-map types. (The old "`--instructions` for all types"
+  behavior changed in notebooklm-py 0.8.1.)
+- **`note create` now returns a real `id`** (fixed in notebooklm-py 0.8.1 — the
+  old "id: null" bug is gone).
+- **Delete/remove commands need `-y` in JSON mode** (upstream). The wrapper
+  passes it automatically for note/artifact/source delete + share remove.
 - **`clear` doesn't accept `--notebook`.** Use current context.
 - **Source `fulltext` for image PDFs returns image URLs, not text.** Use AI chat for synthesis.
-- **`generate` takes `--instructions`, not positional prompt.**
 - **Partial ID matching works everywhere.**
-- **Conversation rate limit ~12 comprehensive turns.**
+- **Conversation rate limit ~12 comprehensive turns.** Use `clear` to reset.
