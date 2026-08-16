@@ -134,6 +134,25 @@ AI Agent → nlm_v3.py (CLI wrapper) → notebooklm (notebooklm-py) → Google N
 - **Partial ID matching works everywhere** — `abc` matches `abc123...`.
 - `notebooklm-py` API was not affected by Google's May 2025 NotebookLM → Gemini notebook rebrand.
 
+## Interop & UI automation
+
+Two things to know if you reuse the auth state outside the CLI:
+
+- **`storage_state.json` has millisecond `expires` timestamps** (upstream `notebooklm-py`
+  bug — rookiepy returns ms, `_cookie_persistence.py` stores it verbatim). ~76/108
+  cookies carry 13-digit values. Playwright rejects these ("Cookie should have a valid
+  expires"). The CLI is unaffected (it reads the field itself); it only breaks direct
+  Playwright reuse. Workaround: for any `expires > 253402300799` (year 9999 in seconds),
+  divide by 1000.
+
+- **Cookie injection does NOT authenticate a fresh browser.** Google binds session
+  cookies to the originating browser's TLS state, so loading `storage_state.json` into
+  a new Playwright context shows "Signed out" even with valid-looking cookies. For
+  authenticated UI automation of `notebook.google.com`, use a **live signed-in CDP
+  browser** (e.g. a Chrome instance with `--remote-debugging-port`), or run
+  `notebooklm login` (interactive) which persists its own browser session. The CLI/HTTP
+  path (this repo) does not need a browser at all.
+
 ## Files
 
 | File | Purpose |
