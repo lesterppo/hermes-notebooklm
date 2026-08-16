@@ -25,6 +25,15 @@ v5 changelog (notebooklm-py 0.8.1):
     poll/rename/retry/wait, research cancel/import, share update) and
     generic passthrough for label/collection/profile/language/agent/skill/mcp.
   * `auth init` now prefers upstream `login --browser-cookies` (rookiepy).
+
+v6 (2026-08-16):
+  * `source add --type file` now detects a stale-session upload failure
+    (source lands 'error' after a clean upload) and falls back to extracting
+    the text as a pasted-text source, telling the user to re-login. Root cause
+    of the underlying failure is stale Google cookies, not a server-side bug.
+  * Added `auth status` (bare `auth` defaults to it): surfaces nominal cookie
+    expiry + session-age staleness + a live RPC check, classifying
+    healthy/expiring/expired/at-risk/broken with a re-login recommendation.
 """
 import sys, os, json, subprocess, pathlib, re, time
 
@@ -354,6 +363,72 @@ def cmd_source_list(args):
     items, count = _parse_list_result(out, "sources", ("id", "title", "type", "status"))
     return _ok(sources=items, n=count)
 
+def _extract_text(path):
+    """Extract text from a file: PDF via pypdf, else plain UTF-8 read."""
+    import pathlib
+    p = pathlib.Path(path)
+    try:
+        if p.suffix.lower() == ".pdf":
+            from pypdf import PdfReader
+            r = PdfReader(str(p))
+            return "\n\n".join((pg.extract_text() or "") for pg in r.pages).strip()
+        return p.read_text(encoding="utf-8", errors="replace").strip()
+    except Exception:
+        return ""
+
+
+def _poll_source_status(sid, max_wait=45):
+    """Poll a source's status until ready/error. Returns the status string."""
+    import time as _t
+    deadline = _t.time() + max_wait
+    while _t.time() < deadline:
+        out, err, rc = _run(["source", "get", "--json", sid], timeout=30)
+        data = _json_or_text(out)
+        if isinstance(data, dict):
+            st = (_unwrap(data, "source") or {}).get("status", "")
+            if st in ("ready", "error"):
+                return st
+        _t.sleep(4)
+    return "processing"
+
+
+def _add_file_with_fallback(path, title=None):
+    """Upload a local file to NotebookLM. The binary upload succeeds normally
+    when the profile's Google cookies are fresh. If the cookies have gone stale,
+    NotebookLM accepts the upload but the source lands in status 'error'
+    (surfacing as SourceProcessingError) — in that case, fall back to extracting
+    the text and adding it as a pasted-text source, and signal that a re-login
+    is needed (run `nlm.py auth init`)."""
+    import pathlib
+    p = pathlib.Path(path)
+    cmd = ["source", "add", "--type", "file", "--json"]
+    if title:
+        cmd.extend(["--title", title])
+    cmd.append(str(p))
+    out, err, rc = _run(cmd, timeout=120)
+    data = _json_or_text(out)
+    src = (_unwrap(data, "source") or {}) if isinstance(data, dict) else {}
+    sid = src.get("id", "")
+    if not sid:
+        return _err(err or out or "file add failed")
+    status = _poll_source_status(sid)
+    if status == "ready":
+        return _ok(id=sid, title=src.get("title", p.name), method="file")
+    # fallback: stale cookies likely; extract text and re-add as a pasted-text source
+    text = _extract_text(p)
+    if not text:
+        return _ok(id=sid, status=status, method="file-failed",
+                   note="binary upload errored (stale NotebookLM cookies); re-login with `nlm.py auth init`; no text extractable")
+    _run(["source", "delete", sid, "-y", "--json"], timeout=30)
+    out2, err2, rc2 = _run(["source", "add", "--type", "text", "--json", text], timeout=120)
+    data2 = _json_or_text(out2)
+    src2 = (_unwrap(data2, "source") or {}) if isinstance(data2, dict) else {}
+    sid2 = src2.get("id", "")
+    return _ok(id=sid2, title=src2.get("title", p.name), method="text-fallback",
+               n_chars=len(text),
+               note="binary upload errored (stale NotebookLM cookies); re-login with `nlm.py auth init`; added as extracted text")
+
+
 def cmd_source_add(args):
     usage = "usage: nlm.py source add [--type url|text|file|youtube] [--title T] <value>"
     if not args:
@@ -377,6 +452,12 @@ def cmd_source_add(args):
     value = " ".join(value_parts)
     if not value:
         return _err(usage)
+    # local file → file upload with a text-extraction fallback for the stale-cookie
+    # case (NotebookLM accepts the binary but leaves the source 'error' when the
+    # profile's Google cookies have expired — re-login to fix)
+    import pathlib
+    if stype == "file" or (stype in (None, "url") and pathlib.Path(value).is_file()):
+        return _add_file_with_fallback(value, title=title)
     cmd = ["source", "add", "--json"]
     if stype:
         cmd.extend(["--type", stype])
@@ -981,6 +1062,115 @@ def cmd_auth_doctor(args):
         return _err(err or out)
     return _ok(raw=out)
 
+
+#: Google auth cookies whose staleness gates NotebookLM operations (esp. file upload).
+#: The PSID / PSIDTS family are session tokens that rotate server-side and can go
+#: stale long before their nominal browser ``expires`` timestamp lapses.
+AUTH_COOKIE_NAMES = {
+    "SID", "__Secure-1PSID", "__Secure-3PSID",
+    "__Secure-1PSIDTS", "__Secure-3PSIDTS",
+    "SAPISID", "__Secure-1PAPISID", "__Secure-3PAPISID",
+    "HSID", "SSID", "APISID",
+    "OSID", "__Secure-OSID",
+    "SIDCC", "__Secure-1PSIDCC", "__Secure-3PSIDCC",
+    "__Secure-ENID",
+}
+
+
+def _norm_expires(e):
+    """Normalize a cookie ``expires`` to unix seconds, or None for session cookies."""
+    if e is None or e == -1 or e <= 0:
+        return None
+    e = float(e)
+    if e > 10**12:  # millisecond timestamp (known notebooklm-py storage-state bug)
+        e = e / 1000.0
+    return e
+
+
+def cmd_auth_status(args):
+    """Surface auth-cookie expiry and staleness. Usage: nlm.py auth status [--verbose]
+
+    Reports three signals: (1) nominal expiry of the Google auth cookies,
+    (2) how long ago the session state was last written (staleness proxy — the
+    PSID/PSIDTS tokens are invalidated server-side within ~2 weeks regardless of
+    nominal expiry), and (3) a live authenticated RPC to catch total breakage."""
+    verbose = "--verbose" in args or "-v" in args
+    now = time.time()
+
+    if not STORAGE.exists():
+        return _err("no storage_state.json at {} — run `nlm.py auth init`".format(STORAGE))
+    try:
+        data = json.loads(STORAGE.read_text())
+    except Exception as e:
+        return _err("failed to parse storage_state.json: {}".format(e))
+    cookies = data.get("cookies", [])
+    if not cookies:
+        return _err("no cookies in storage_state.json — run `nlm.py auth init`")
+
+    auth = [c for c in cookies if c.get("name") in AUTH_COOKIE_NAMES]
+    expiring = []   # (name, domain, days_remaining)
+    session_only = 0
+    for c in auth:
+        e = _norm_expires(c.get("expires", -1))
+        if e is None:
+            session_only += 1
+            continue
+        days = (e - now) / 86400.0
+        expiring.append((c.get("name", ""), c.get("domain", ""), days))
+    expiring.sort(key=lambda x: x[2])
+
+    min_name, min_domain, min_days = expiring[0] if expiring else ("", "", None)
+
+    # session state age (staleness proxy)
+    age_days = (now - STORAGE.stat().st_mtime) / 86400.0
+
+    # live authenticated RPC (weak signal: list may work even when the session
+    # is server-side stale, but it catches deleted cookies / wrong account)
+    live = "ok"
+    out, err, rc = _run(["list", "--json"], timeout=30)
+    if rc != 0:
+        live = "fail"
+    else:
+        d = _json_or_text(out)
+        if not isinstance(d, (dict, list)):
+            live = "fail"
+
+    # classify
+    if min_days is not None and min_days < 0:
+        status = "expired"
+        rec = "re-login NOW: run `nlm.py auth init` or `notebooklm login`"
+    elif live == "fail":
+        status = "broken"
+        rec = "auth broken (RPC failed) — re-login: run `nlm.py auth init`"
+    elif min_days is not None and min_days < 7:
+        status = "expiring"
+        rec = "re-login within {:.0f} days: run `nlm.py auth init`".format(min_days)
+    elif age_days > 14:
+        status = "at-risk"
+        rec = "session not refreshed in {:.0f} days (server-side staleness likely) — re-login: run `nlm.py auth init`".format(age_days)
+    else:
+        status = "healthy"
+        rec = "no action needed"
+
+    res = {
+        "status": status,
+        "recommendation": rec,
+        "n_cookies": len(cookies),
+        "auth_cookies": len(auth),
+        "session_only_cookies": session_only,
+        "min_expiry_days": round(min_days, 1) if min_days is not None else None,
+        "min_expiry_cookie": min_name if min_name else None,
+        "min_expiry_domain": min_domain if min_domain else None,
+        "session_age_days": round(age_days, 1),
+        "live_check": live,
+    }
+    if verbose:
+        res["expiring"] = [
+            {"name": n, "domain": d, "days": round(x, 1)}
+            for n, d, x in expiring[:8]
+        ]
+    return _ok(**res)
+
 # ── clear ───────────────────────────────────────────────────────
 
 def cmd_clear(args):
@@ -1071,6 +1261,7 @@ GROUP_MAP = {
     "auth": {
         "init": cmd_auth_init,
         "doctor": cmd_auth_doctor,
+        "status": cmd_auth_status,
     },
     "clear": {"clear": cmd_clear},
 }
@@ -1102,7 +1293,7 @@ Groups:
   share      status, public, add, remove, view-level, update
   history    [--save] [--json] [--limit N] [--show-all]
   configure  [--mode MODE] [--persona TEXT] [--response-length LEN]
-  auth       init [--account EMAIL] [--browser B], doctor
+  auth       init [--account EMAIL] [--browser B], doctor, status [--verbose]
   clear      [notebook_id]
 
 Passthrough groups (forwarded to upstream): label, collection, profile,
@@ -1159,6 +1350,9 @@ def main():
 
     actions = GROUP_MAP[group]
     if not rest:
+        if group == "auth":
+            print(cmd_auth_status([]))
+            return
         print(_err("group '{}' requires an action. Valid: {}".format(group, ", ".join(actions.keys()))))
         return
 

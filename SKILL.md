@@ -51,7 +51,7 @@ nlm_v3.py <group> <action> [args...]
 | share | — | status, public, add, remove, view-level, update |
 | history | — | --limit, --save, --show-all |
 | configure | — | --mode, --persona, --response-length |
-| auth | — | init, doctor |
+| auth | — | init, doctor, status |
 | clear | — | (reset conversation) |
 
 **Passthrough groups** (forwarded to upstream): `label`, `collection`, `profile`,
@@ -77,7 +77,7 @@ Large answers (>3000 chars) are saved to disk with a file pointer.
 
 ## Pitfalls
 
-- **Auth cookies expire ~30 days.** Re-run `nlm_v3.py auth init --account EMAIL`.
+- **Auth cookies go server-side-stale within ~2 weeks** (PSID/PSIDTS tokens). Check `nlm_v3.py auth status` (or bare `auth`) and re-run `nlm_v3.py auth init --account EMAIL` when uploads fail with `SourceProcessingError`.
 - **`generate` takes a positional description** for all types EXCEPT `mind-map`,
   which uses `--instructions` + `--kind [interactive|note-backed]`. `--wait` is
   only valid on non-mind-map types. (The old "`--instructions` for all types"

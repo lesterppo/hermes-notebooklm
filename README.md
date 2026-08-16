@@ -35,7 +35,7 @@ python3 nlm_v3.py "What is in this notebook?"        # Ask a question
 | `share` | — | status, public, add, remove, view-level, update |
 | `history` | — | --limit, --save, --show-all |
 | `configure` | — | --mode, --persona, --response-length |
-| `auth` | — | init, doctor |
+| `auth` | — | init, doctor, status |
 | `clear` | — | (reset conversation) |
 
 **Passthrough groups** (forwarded straight to upstream `notebooklm`): `label`,
@@ -125,7 +125,7 @@ AI Agent → nlm_v3.py (CLI wrapper) → notebooklm (notebooklm-py) → Google N
 
 ## Pitfalls
 
-- **Auth cookies expire ~30 days.** Re-run `nlm_v3.py auth init --account EMAIL` or `notebooklm login --browser-cookies auto --account EMAIL`. Use `notebooklm auth inspect` to see signed-in accounts and `notebooklm doctor` for health checks.
+- **Auth cookies go server-side-stale within ~2 weeks** (the PSID/PSIDTS session tokens are invalidated by Google regardless of their ~365-day nominal `expires`). When uploads start failing with `SourceProcessingError`, check `nlm_v3.py auth status` (or bare `auth`) and re-run `nlm_v3.py auth init --account EMAIL` / `notebooklm login --browser-cookies auto --account EMAIL`. The `source add --type file` path auto-detects a stale-session failure and falls back to pasted-text, telling you to re-login.
 - **`generate` takes a positional description** for every type except `mind-map`, which takes `--instructions` and `--kind [interactive|note-backed]`. `--wait` is only valid on non-mind-map types.
 - **Delete/remove commands need `-y` in JSON mode** (upstream). The wrapper passes it automatically.
 - **`clear` doesn't accept `--notebook`** — it operates on current context.
