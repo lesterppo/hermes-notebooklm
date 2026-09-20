@@ -34,11 +34,47 @@ v6 (2026-08-16):
   * Added `auth status` (bare `auth` defaults to it): surfaces nominal cookie
     expiry + session-age staleness + a live RPC check, classifying
     healthy/expiring/expired/at-risk/broken with a re-login recommendation.
+
+v7 (2026-09-20):
+  * FIX: `-n/--notebook` was accepted but IGNORED by most commands (source,
+    artifact, note, share, research, configure, status), so a request for one
+    notebook silently answered about the DEFAULT notebook — producing wrong
+    answers and, for `share status`, a wrong public-link report. Every command
+    now parses and forwards it.
+  * FIX: `artifact download` never passed a notebook at all.
+  * Added `_split_nb()` so commands accept `-n <id>` in any position.
+  * `status`/`doctor` now use upstream `--json` and return parsed fields
+    instead of a rendered table / raw JSON string.
+  * Parsed the leftover raw blobs (share public/view-level, note save/rename/
+    delete, source delete, configure, clear).
+  * New filters: `source list --label/--status/--limit`, `artifact list
+    --type/--limit`, `prompts --source`.
+  * New artifact types `fantasy-map` and `file`; new passthrough
+    `generate revise-slide`.
+  * Multi-account: `--profile NAME` (or NOTEBOOKLM_PROFILE) is applied as the
+    upstream global profile flag, and `auth check/inspect/logout/refresh/
+    import-cookies` now pass through.
+  * `NOTEBOOKLM_CLI` env / PATH lookup for the upstream binary (CI-safe),
+    `NOTEBOOKLM_TRANSPORT=curl_cffi` pinned (Google rejects some transports).
 """
 import sys, os, json, subprocess, pathlib, re, time
+import shutil
 
 HOME = pathlib.Path.home()
-NLM = str(HOME / ".local" / "bin" / "notebooklm")
+
+
+def _find_nlm() -> str:
+    """Locate the upstream CLI: NOTEBOOKLM_CLI > PATH > ~/.local/bin."""
+    env = os.environ.get("NOTEBOOKLM_CLI")
+    if env and os.path.exists(env):
+        return env
+    found = shutil.which("notebooklm")
+    if found:
+        return found
+    return str(HOME / ".local" / "bin" / "notebooklm")
+
+
+NLM = _find_nlm()
 CFG_DIR = HOME / ".hermes" / "nlm_cache"
 CFG_DIR.mkdir(parents=True, exist_ok=True)
 NB_FILE = CFG_DIR / "notebook.txt"
@@ -46,19 +82,29 @@ OUT_DIR = HOME / ".hermes" / "nlm_output"
 OUT_DIR.mkdir(parents=True, exist_ok=True)
 STORAGE = HOME / ".notebooklm" / "profiles" / "default" / "storage_state.json"
 
+# Upstream account profile (multi-account). Overridable per-run with --profile,
+# which main() strips from argv before dispatch.
+PROFILE = os.environ.get("NOTEBOOKLM_PROFILE", "")
+
 # ── helpers ──────────────────────────────────────────────────
 
 def _run(args, timeout=90):
     """Run notebooklm CLI, return (stdout, stderr, returncode)."""
+    cmd = [NLM, "--quiet"]
+    # Profile is a GLOBAL upstream flag, so it has to precede the subcommand.
+    if PROFILE:
+        cmd += ["-p", PROFILE]
+    cmd += args
     try:
-        r = subprocess.run([NLM, "--quiet"] + args,
+        r = subprocess.run(cmd,
             capture_output=True, text=True, timeout=timeout,
-            env={**os.environ, "PYTHONUNBUFFERED": "1"})
+            env={**os.environ, "PYTHONUNBUFFERED": "1",
+                 "NOTEBOOKLM_TRANSPORT": os.environ.get("NOTEBOOKLM_TRANSPORT", "curl_cffi")})
         return r.stdout.strip(), r.stderr.strip(), r.returncode
     except subprocess.TimeoutExpired:
         return "", "timeout after {}s".format(timeout), 124
     except FileNotFoundError:
-        return "", "notebooklm binary not found at {}".format(NLM), 127
+        return "", "notebooklm binary not found at {} (set NOTEBOOKLM_CLI)".format(NLM), 127
 
 def _ok(**kw):
     d = {"s": "ok"}
@@ -88,6 +134,46 @@ def _default_nb():
 def _nb_args(nb):
     nid = nb or _default_nb()
     return ["--notebook", nid] if nid else []
+
+def _split_nb(args, keys=("-n", "--notebook")):
+    """Pull `-n/--notebook <id>` out of an argument list, wherever it sits.
+
+    Returns (notebook_or_None, remaining_args). Every notebook-scoped command
+    goes through this: silently ignoring -n used to answer about the DEFAULT
+    notebook, which is worse than erroring because the output looks valid.
+    """
+    nb = None
+    rest = []
+    i = 0
+    while i < len(args):
+        if args[i] in keys:
+            if i + 1 < len(args):
+                nb = args[i + 1]
+                i += 2
+                continue
+            i += 1
+            continue
+        rest.append(args[i])
+        i += 1
+    return nb, rest
+
+def _pick(args, *names, **kw):
+    """Pop `--name value` (or `-x value`) pairs out of args -> (values, rest)."""
+    vals = {}
+    rest = []
+    i = 0
+    while i < len(args):
+        if args[i] in names:
+            key = args[i]
+            if i + 1 < len(args):
+                vals[key] = args[i + 1]
+                i += 2
+                continue
+            i += 1
+            continue
+        rest.append(args[i])
+        i += 1
+    return vals, rest
 
 def _clean_latex(text):
     """Convert common LaTeX math tokens to Unicode, strip math delimiters."""
@@ -208,34 +294,76 @@ def cmd_notebook_delete(args):
         return _err(err or out)
     return _ok(raw=out)
 
+def _resolve_nb_id(partial):
+    """Expand a partial notebook id to the full one (falls back to the input)."""
+    if len(partial) >= 36:
+        return partial
+    out, err, rc = _run(["list", "--json"], timeout=30)
+    data = _json_or_text(out)
+    items = data if isinstance(data, list) else (data.get("notebooks", []) if isinstance(data, dict) else [])
+    for nb in items:
+        if isinstance(nb, dict) and str(nb.get("id", "")).startswith(partial):
+            return nb["id"]
+    return partial
+
+
 def cmd_notebook_use(args):
-    if not args:
-        out, err, rc = _run(["status", "--json"])
+    nb, rest = _split_nb(args)
+    if not rest:
+        out, err, rc = _run(["status", "--json"] + _nb_args(nb))
         if rc == 0:
-            return _ok(raw=out)
+            data = _json_or_text(out)
+            if isinstance(data, dict):
+                return _ok(notebook=data.get("notebook_id") or _default_nb(),
+                           cached_default=_default_nb())
         return _ok(notebook=_default_nb())
-    nid = args[0]
-    out, err, rc = _run(["use", nid])
+    nid = rest[0]
+    out, err, rc = _run(["use", nid, "--json"])
     if rc == 0:
-        NB_FILE.write_text(nid)
-        return _ok(notebook=nid)
+        full = _resolve_nb_id(nid)
+        NB_FILE.write_text(full)
+        return _ok(notebook=full, requested=nid)
     return _err(err or out)
 
 def cmd_notebook_status(args):
-    out, err, rc = _run(["status"])
+    # NOTE: upstream `status` has no --notebook option (it reports the current
+    # context), so -n is accepted here only to be reported back, never forwarded.
+    nb, rest = _split_nb(args)
+    out, err, rc = _run(["status", "--json"])
     if rc != 0:
         return _err(err or out)
-    return _ok(raw=out)
+    data = _json_or_text(out)
+    if isinstance(data, dict):
+        return _ok(notebook_id=data.get("notebook_id") or _default_nb(),
+                   title=data.get("notebook_title") or data.get("title") or "",
+                   conversation_id=data.get("conversation_id", ""),
+                   cached_default=_default_nb(),
+                   requested=nb or None,
+                   profile=data.get("profile", PROFILE or "default"))
+    return _ok(raw=out, cached_default=_default_nb())
 
 def cmd_notebook_summary(args):
-    nb = args[0] if args else _default_nb()
-    out, err, rc = _run(["summary"] + _nb_args(nb), timeout=60)
+    nb, rest = _split_nb(args)
+    topics_flag = "--topics" in rest
+    nb = nb or (rest[0] if rest else "") or _default_nb()
+    cmd = ["summary", "--json"] + _nb_args(nb)
+    if topics_flag:
+        cmd.append("--topics")
+    out, err, rc = _run(cmd, timeout=60)
     if rc != 0:
         return _err(err or out)
+    data = _json_or_text(out)
+    if isinstance(data, dict):
+        text = data.get("summary") or data.get("text") or ""
+        res = {"summary": _maybe_file(text, "summary")}
+        if data.get("topics"):
+            res["topics"] = data["topics"]
+        return _ok(**res)
     return _ok(summary=_maybe_file(out, "summary"))
 
 def cmd_notebook_metadata(args):
-    nb = args[0] if args else _default_nb()
+    nb, rest = _split_nb(args)
+    nb = nb or (rest[0] if rest else "") or _default_nb()
     out, err, rc = _run(["metadata", "--json"] + _nb_args(nb), timeout=30)
     if rc != 0:
         return _err(err or out)
@@ -320,6 +448,7 @@ def cmd_suggest_prompts(args):
     mode = None
     query = None
     nb = None
+    sources = []
     rest = []
     i = 0
     while i < len(args):
@@ -331,6 +460,10 @@ def cmd_suggest_prompts(args):
             i += 1
             if i < len(args):
                 query = args[i]
+        elif args[i] in ("-s", "--source"):
+            i += 1
+            if i < len(args):
+                sources.append(args[i])
         elif args[i] in ("-n", "--notebook"):
             i += 1
             if i < len(args):
@@ -343,6 +476,8 @@ def cmd_suggest_prompts(args):
         cmd.extend(["--mode", mode])
     if query:
         cmd.extend(["--query", query])
+    for s in sources:
+        cmd.extend(["--source", s])
     cmd.extend(_nb_args(nb))
     cmd.extend(rest)
     out, err, rc = _run(cmd, timeout=60)
@@ -356,8 +491,17 @@ def cmd_suggest_prompts(args):
 # ── source group ─────────────────────────────────────────────
 
 def cmd_source_list(args):
-    nb = _default_nb()
-    out, err, rc = _run(["source", "list", "--json"] + _nb_args(nb), timeout=30)
+    nb, rest = _split_nb(args)
+    cmd = ["source", "list", "--json"]
+    for flag in ("--label", "--status", "--limit"):
+        if flag in rest:
+            i = rest.index(flag)
+            if i + 1 < len(rest):
+                cmd += [flag, rest[i + 1]]
+    if "--no-truncate" in rest:
+        cmd.append("--no-truncate")
+    cmd += _nb_args(nb)
+    out, err, rc = _run(cmd, timeout=30)
     if rc != 0:
         return _err(err or out)
     items, count = _parse_list_result(out, "sources", ("id", "title", "type", "status"))
@@ -377,12 +521,13 @@ def _extract_text(path):
         return ""
 
 
-def _poll_source_status(sid, max_wait=45):
+def _poll_source_status(sid, max_wait=45, nb=None):
     """Poll a source's status until ready/error. Returns the status string."""
     import time as _t
+    nb_args = _nb_args(nb)
     deadline = _t.time() + max_wait
     while _t.time() < deadline:
-        out, err, rc = _run(["source", "get", "--json", sid], timeout=30)
+        out, err, rc = _run(["source", "get", "--json", sid] + nb_args, timeout=30)
         data = _json_or_text(out)
         if isinstance(data, dict):
             st = (_unwrap(data, "source") or {}).get("status", "")
@@ -392,7 +537,7 @@ def _poll_source_status(sid, max_wait=45):
     return "processing"
 
 
-def _add_file_with_fallback(path, title=None):
+def _add_file_with_fallback(path, title=None, nb=None):
     """Upload a local file to NotebookLM. The binary upload succeeds normally
     when the profile's Google cookies are fresh. If the cookies have gone stale,
     NotebookLM accepts the upload but the source lands in status 'error'
@@ -401,7 +546,8 @@ def _add_file_with_fallback(path, title=None):
     is needed (run `nlm.py auth init`)."""
     import pathlib
     p = pathlib.Path(path)
-    cmd = ["source", "add", "--type", "file", "--json"]
+    nb_args = _nb_args(nb)
+    cmd = ["source", "add", "--type", "file", "--json"] + nb_args
     if title:
         cmd.extend(["--title", title])
     cmd.append(str(p))
@@ -411,7 +557,7 @@ def _add_file_with_fallback(path, title=None):
     sid = src.get("id", "")
     if not sid:
         return _err(err or out or "file add failed")
-    status = _poll_source_status(sid)
+    status = _poll_source_status(sid, nb=nb)
     if status == "ready":
         return _ok(id=sid, title=src.get("title", p.name), method="file")
     # fallback: stale cookies likely; extract text and re-add as a pasted-text source
@@ -419,8 +565,8 @@ def _add_file_with_fallback(path, title=None):
     if not text:
         return _ok(id=sid, status=status, method="file-failed",
                    note="binary upload errored (stale NotebookLM cookies); re-login with `nlm.py auth init`; no text extractable")
-    _run(["source", "delete", sid, "-y", "--json"], timeout=30)
-    out2, err2, rc2 = _run(["source", "add", "--type", "text", "--json", text], timeout=120)
+    _run(["source", "delete", sid, "-y", "--json"] + nb_args, timeout=30)
+    out2, err2, rc2 = _run(["source", "add", "--type", "text", "--json"] + nb_args + [text], timeout=120)
     data2 = _json_or_text(out2)
     src2 = (_unwrap(data2, "source") or {}) if isinstance(data2, dict) else {}
     sid2 = src2.get("id", "")
@@ -430,9 +576,10 @@ def _add_file_with_fallback(path, title=None):
 
 
 def cmd_source_add(args):
-    usage = "usage: nlm.py source add [--type url|text|file|youtube] [--title T] <value>"
+    usage = "usage: nlm.py source add [--type url|text|file|youtube] [--title T] [-n nb] <value>"
     if not args:
         return _err(usage)
+    nb, args = _split_nb(args)
     stype = None
     title = None
     value_parts = []
@@ -457,12 +604,13 @@ def cmd_source_add(args):
     # profile's Google cookies have expired — re-login to fix)
     import pathlib
     if stype == "file" or (stype in (None, "url") and pathlib.Path(value).is_file()):
-        return _add_file_with_fallback(value, title=title)
+        return _add_file_with_fallback(value, title=title, nb=nb)
     cmd = ["source", "add", "--json"]
     if stype:
         cmd.extend(["--type", stype])
     if title:
         cmd.extend(["--title", title])
+    cmd.extend(_nb_args(nb))
     cmd.append(value)
     out, err, rc = _run(cmd, timeout=120)
     if rc != 0:
@@ -475,25 +623,28 @@ def cmd_source_add(args):
     return _ok(raw=out)
 
 def cmd_source_guide(args):
-    if not args:
-        return _err("usage: nlm.py source guide <id>")
-    out, err, rc = _run(["source", "guide", args[0]], timeout=60)
+    nb, rest = _split_nb(args)
+    if not rest:
+        return _err("usage: nlm.py source guide <id> [-n nb]")
+    out, err, rc = _run(["source", "guide", rest[0]] + _nb_args(nb), timeout=60)
     if rc != 0:
         return _err(err or out)
     return _ok(guide=_maybe_file(out, "guide"))
 
 def cmd_source_fulltext(args):
-    if not args:
-        return _err("usage: nlm.py source fulltext <id>")
-    out, err, rc = _run(["source", "fulltext", args[0]], timeout=60)
+    nb, rest = _split_nb(args)
+    if not rest:
+        return _err("usage: nlm.py source fulltext <id> [-n nb]")
+    out, err, rc = _run(["source", "fulltext", rest[0]] + _nb_args(nb), timeout=60)
     if rc != 0:
         return _err(err or out)
     return _ok(fulltext=_maybe_file(out, "fulltext"))
 
 def cmd_source_get(args):
-    if not args:
-        return _err("usage: nlm.py source get <id>")
-    out, err, rc = _run(["source", "get", "--json", args[0]], timeout=30)
+    nb, rest = _split_nb(args)
+    if not rest:
+        return _err("usage: nlm.py source get <id> [-n nb]")
+    out, err, rc = _run(["source", "get", "--json", rest[0]] + _nb_args(nb), timeout=30)
     if rc != 0:
         return _err(err or out)
     data = _json_or_text(out)
@@ -505,17 +656,26 @@ def cmd_source_get(args):
     return _ok(raw=out)
 
 def cmd_source_delete(args):
-    if not args:
-        return _err("usage: nlm.py source delete <id>")
-    out, err, rc = _run(["source", "delete", args[0], "-y", "--json"], timeout=30)
+    nb, rest = _split_nb(args)
+    if not rest:
+        return _err("usage: nlm.py source delete <id> [-n nb]")
+    out, err, rc = _run(["source", "delete", rest[0], "-y", "--json"] + _nb_args(nb), timeout=30)
     if rc != 0:
         return _err(err or out)
-    return _ok(raw=out)
+    data = _json_or_text(out)
+    if isinstance(data, dict):
+        return _ok(id=rest[0], deleted=bool(data.get("deleted", True)))
+    return _ok(id=rest[0], raw=out)
 
 def cmd_source_clean(args):
-    out, err, rc = _run(["source", "clean", "--json"], timeout=60)
+    nb, rest = _split_nb(args)
+    out, err, rc = _run(["source", "clean", "--json"] + _nb_args(nb), timeout=60)
     if rc != 0:
         return _err(err or out)
+    data = _json_or_text(out)
+    if isinstance(data, dict):
+        scalar = {k: v for k, v in data.items() if not isinstance(v, (list, dict))}
+        return _ok(**scalar)
     return _ok(raw=out)
 
 def cmd_source_add_research(args):
@@ -577,15 +737,19 @@ def cmd_source_add_research(args):
 # ── research group ─────────────────────────────────────────────
 
 def cmd_research_status(args):
-    nb = _default_nb()
+    nb, rest = _split_nb(args)
     out, err, rc = _run(["research", "status", "--json"] + _nb_args(nb), timeout=30)
     if rc != 0:
         return _err(err or out)
+    data = _json_or_text(out)
+    if isinstance(data, dict):
+        return _ok(**(data if "status" in data else {"raw": out}),
+                   notebook=nb or _default_nb())
     return _ok(raw=out)
 
 def cmd_research_wait(args):
-    import_all = "--import-all" in args
-    nb = _default_nb()
+    nb, rest = _split_nb(args)
+    import_all = "--import-all" in rest
     cmd = ["research", "wait", "--json"]
     if import_all:
         cmd.append("--import-all")
@@ -593,18 +757,32 @@ def cmd_research_wait(args):
     out, err, rc = _run(cmd, timeout=600)
     if rc != 0:
         return _err(err or out[:500])
+    data = _json_or_text(out)
+    if isinstance(data, dict):
+        return _ok(status=data.get("status", ""),
+                   n_sources=len(data.get("sources", []) or []))
     return _ok(raw=out)
 
 # ── artifact group ─────────────────────────────────────────────
 
 ARTIFACT_TYPES = [
     "audio", "video", "cinematic-video", "slide-deck", "infographic",
-    "mind-map", "data-table", "quiz", "flashcards", "report"
+    "mind-map", "data-table", "quiz", "flashcards", "report",
+    "fantasy-map", "file",
 ]
 
 def cmd_artifact_list(args):
-    nb = _default_nb()
-    out, err, rc = _run(["artifact", "list", "--json"] + _nb_args(nb), timeout=30)
+    nb, rest = _split_nb(args)
+    cmd = ["artifact", "list", "--json"]
+    for flag in ("--type", "--limit"):
+        if flag in rest:
+            i = rest.index(flag)
+            if i + 1 < len(rest):
+                cmd += [flag, rest[i + 1]]
+    if "--no-truncate" in rest:
+        cmd.append("--no-truncate")
+    cmd += _nb_args(nb)
+    out, err, rc = _run(cmd, timeout=30)
     if rc != 0:
         return _err(err or out)
     items, count = _parse_list_result(out, "artifacts", ("id", "title", "type", "status", "created_at"))
@@ -708,19 +886,20 @@ def cmd_artifact_generate(args):
 
 def cmd_artifact_download(args):
     usage = ("usage: nlm.py artifact download <type> [--artifact <id>] [--format pdf|pptx] "
-             "[--all] [--dry-run] [--name T]\n"
+             "[--all] [--dry-run] [--name T] [-n nb]\n"
              "types: {}".format(", ".join(ARTIFACT_TYPES)))
     if not args:
         return _err(usage)
     atype = args[0]
     if atype not in ARTIFACT_TYPES:
         return _err("unknown type '{}'. Valid: {}".format(atype, ", ".join(ARTIFACT_TYPES)))
+    nb, args = _split_nb(args[1:])
     aid = None
     fmt = None
     all_flag = False
     dry_run = False
     name = None
-    i = 1
+    i = 0
     while i < len(args):
         if args[i] == "--artifact" or args[i] == "-a":
             i += 1
@@ -751,6 +930,7 @@ def cmd_artifact_download(args):
         cmd.append("--dry-run")
     if name:
         cmd.extend(["--name", name])
+    cmd.extend(_nb_args(nb))
     out, err, rc = _run(cmd, timeout=60)
     if rc != 0:
         return _err(err or out[:500])
@@ -762,7 +942,8 @@ def cmd_artifact_download(args):
     return _ok(raw=out)
 
 def cmd_artifact_suggestions(args):
-    out, err, rc = _run(["artifact", "suggestions", "--json"], timeout=30)
+    nb, rest = _split_nb(args)
+    out, err, rc = _run(["artifact", "suggestions", "--json"] + _nb_args(nb), timeout=30)
     if rc != 0:
         return _err(err or out)
     data = _json_or_text(out)
@@ -773,30 +954,51 @@ def cmd_artifact_suggestions(args):
     return _ok(raw=out)
 
 def cmd_artifact_get(args):
-    if not args:
-        return _err("usage: nlm.py artifact get <id>")
-    out, err, rc = _run(["artifact", "get", "--json", args[0]], timeout=30)
+    nb, rest = _split_nb(args)
+    if not rest:
+        return _err("usage: nlm.py artifact get <id> [-n nb]")
+    nb_args = _nb_args(nb)
+    out, err, rc = _run(["artifact", "get", "--json", rest[0]] + nb_args, timeout=30)
     if rc != 0:
         return _err(err or out)
     data = _json_or_text(out)
     if isinstance(data, dict):
         art = _unwrap(data, "artifact")
+        url = art.get("url", "") or art.get("download_url", "")
+        if not url:
+            # poll returns the CDN url for completed artifacts (get does not)
+            try:
+                pout, perr, prc = _run(["artifact", "poll", rest[0], "--json"] + nb_args, timeout=30)
+                if prc == 0:
+                    pdata = _json_or_text(pout)
+                    if isinstance(pdata, dict):
+                        inner = _unwrap(pdata, "result")
+                        url = (inner.get("url", "") if isinstance(inner, dict) else "") \
+                              or pdata.get("url", "") or ""
+            except Exception:
+                pass
         return _ok(id=art.get("id", ""), title=art.get("title", ""),
-                   type=art.get("type", ""), status=art.get("status", ""))
+                   type=art.get("type", ""), status=art.get("status", ""),
+                   url=url)
     return _ok(raw=out)
 
 def cmd_artifact_delete(args):
-    if not args:
-        return _err("usage: nlm.py artifact delete <id>")
-    out, err, rc = _run(["artifact", "delete", args[0], "-y", "--json"], timeout=30)
+    nb, rest = _split_nb(args)
+    if not rest:
+        return _err("usage: nlm.py artifact delete <id> [-n nb]")
+    out, err, rc = _run(["artifact", "delete", rest[0], "-y", "--json"] + _nb_args(nb), timeout=30)
     if rc != 0:
         return _err(err or out)
-    return _ok(raw=out)
+    data = _json_or_text(out)
+    if isinstance(data, dict):
+        return _ok(id=rest[0], deleted=bool(data.get("deleted", True)))
+    return _ok(id=rest[0], raw=out)
 
 # ── note group ──────────────────────────────────────────────────
 
 def cmd_note_list(args):
-    out, err, rc = _run(["note", "list", "--json"], timeout=15)
+    nb, rest = _split_nb(args)
+    out, err, rc = _run(["note", "list", "--json"] + _nb_args(nb), timeout=15)
     if rc != 0:
         return _err(err or out)
     items, count = _parse_list_result(out, "notes", ("id", "title", "preview"), strip_date=False)
@@ -804,10 +1006,11 @@ def cmd_note_list(args):
     for n in items:
         clean.append({"id": n.get("id", ""), "title": n.get("title", ""),
                        "preview": (n.get("preview", "") or "")[:80]})
-    return _ok(notes=clean, n=count)
+    return _ok(notes=clean, n=count, notebook=nb or _default_nb())
 
 def cmd_note_create(args):
-    usage = "usage: nlm.py note create [-t title] [content...]"
+    usage = "usage: nlm.py note create [-t title] [-n nb] [content...]"
+    nb, args = _split_nb(args)
     if not args:
         return _err(usage)
     title = None
@@ -827,7 +1030,7 @@ def cmd_note_create(args):
             content = sys.stdin.read().strip()
         if not content:
             return _err(usage + " (no content provided)")
-    cmd = ["note", "create", "--json"]
+    cmd = ["note", "create", "--json"] + _nb_args(nb)
     if title:
         cmd.extend(["-t", title])
     cmd.append(content)
@@ -836,51 +1039,69 @@ def cmd_note_create(args):
         return _err(err or out)
     data = _json_or_text(out)
     if isinstance(data, dict):
-        return _ok(id=data.get("id", ""), title=data.get("title", ""))
+        note = _unwrap(data, "note")
+        return _ok(id=note.get("id", ""), title=note.get("title", ""))
     return _ok(raw=out)
 
 def cmd_note_get(args):
-    if not args:
-        return _err("usage: nlm.py note get <id>")
-    out, err, rc = _run(["note", "get", "--json", args[0]], timeout=15)
+    nb, rest = _split_nb(args)
+    if not rest:
+        return _err("usage: nlm.py note get <id> [-n nb]")
+    out, err, rc = _run(["note", "get", "--json", rest[0]] + _nb_args(nb), timeout=15)
     if rc != 0:
         return _err(err or out)
     data = _json_or_text(out)
     if isinstance(data, dict):
-        return _ok(id=data.get("id", ""), title=data.get("title", ""),
-                   content=data.get("content", ""))
+        note = _unwrap(data, "note")
+        return _ok(id=note.get("id", ""), title=note.get("title", ""),
+                   content=_maybe_file(note.get("content", "") or "", "note"))
     return _ok(raw=out)
 
 def cmd_note_save(args):
-    if len(args) < 2:
-        return _err("usage: nlm.py note save <id> <content>")
-    nid = args[0]
-    content = " ".join(args[1:])
-    out, err, rc = _run(["note", "save", "--json", "--content", content, nid], timeout=30)
+    nb, rest = _split_nb(args)
+    if len(rest) < 2:
+        return _err("usage: nlm.py note save <id> <content> [-n nb]")
+    nid = rest[0]
+    content = " ".join(rest[1:])
+    out, err, rc = _run(["note", "save", "--json", "--content", content, nid] + _nb_args(nb), timeout=30)
     if rc != 0:
         return _err(err or out)
-    return _ok(raw=out)
+    data = _json_or_text(out)
+    if isinstance(data, dict):
+        return _ok(id=data.get("id", nid), saved=bool(data.get("saved", True)),
+                   n_chars=len(content))
+    return _ok(id=nid, raw=out)
 
 def cmd_note_rename(args):
-    if len(args) < 2:
-        return _err("usage: nlm.py note rename <id> <new_title>")
-    out, err, rc = _run(["note", "rename", "--json", args[0], args[1]], timeout=15)
+    nb, rest = _split_nb(args)
+    if len(rest) < 2:
+        return _err("usage: nlm.py note rename <id> <new_title> [-n nb]")
+    out, err, rc = _run(["note", "rename", "--json", rest[0], rest[1]] + _nb_args(nb), timeout=15)
     if rc != 0:
         return _err(err or out)
-    return _ok(raw=out)
+    data = _json_or_text(out)
+    if isinstance(data, dict):
+        return _ok(id=data.get("id", rest[0]), title=data.get("title", rest[1]),
+                   renamed=bool(data.get("renamed", True)))
+    return _ok(id=rest[0], raw=out)
 
 def cmd_note_delete(args):
-    if not args:
-        return _err("usage: nlm.py note delete <id>")
-    out, err, rc = _run(["note", "delete", args[0], "-y", "--json"], timeout=15)
+    nb, rest = _split_nb(args)
+    if not rest:
+        return _err("usage: nlm.py note delete <id> [-n nb]")
+    out, err, rc = _run(["note", "delete", rest[0], "-y", "--json"] + _nb_args(nb), timeout=15)
     if rc != 0:
         return _err(err or out)
-    return _ok(raw=out)
+    data = _json_or_text(out)
+    if isinstance(data, dict):
+        return _ok(id=rest[0], deleted=bool(data.get("deleted", True)))
+    return _ok(id=rest[0], raw=out)
 
 # ── share group ─────────────────────────────────────────────────
 
 def cmd_share_status(args):
-    out, err, rc = _run(["share", "status", "--json"], timeout=15)
+    nb, rest = _split_nb(args)
+    out, err, rc = _run(["share", "status", "--json"] + _nb_args(nb), timeout=15)
     if rc != 0:
         return _err(err or out)
     data = _json_or_text(out)
@@ -888,7 +1109,8 @@ def cmd_share_status(args):
         users = [{"email": u.get("email", ""), "permission": u.get("permission", ""),
                   "name": u.get("display_name", "")}
                  for u in data.get("shared_users", []) if isinstance(u, dict)]
-        return _ok(public=data.get("is_public", False),
+        return _ok(notebook=nb or _default_nb(),
+                   public=data.get("is_public", False),
                    access=data.get("access", ""),
                    url=data.get("share_url", ""),
                    view_level=data.get("view_level", ""),
@@ -896,50 +1118,69 @@ def cmd_share_status(args):
     return _ok(raw=out)
 
 def cmd_share_public(args):
-    if not args or args[0] not in ("enable", "disable"):
-        return _err("usage: nlm.py share public enable|disable")
-    out, err, rc = _run(["share", "public", "--{}".format(args[0]), "--json"], timeout=15)
+    nb, rest = _split_nb(args)
+    if not rest or rest[0] not in ("enable", "disable"):
+        return _err("usage: nlm.py share public enable|disable [-n nb]")
+    out, err, rc = _run(["share", "public", "--{}".format(rest[0]), "--json"] + _nb_args(nb), timeout=15)
     if rc != 0:
         return _err(err or out)
+    data = _json_or_text(out)
+    if isinstance(data, dict):
+        return _ok(public=bool(data.get("is_public", rest[0] == "enable")),
+                   url=data.get("share_url") or "",
+                   notebook=nb or _default_nb())
     return _ok(raw=out)
 
 def cmd_share_add(args):
-    if len(args) < 1:
-        return _err("usage: nlm.py share add <email> [--permission viewer|editor] [--no-notify]")
-    email = args[0]
+    nb, rest = _split_nb(args)
+    if len(rest) < 1:
+        return _err("usage: nlm.py share add <email> [--permission viewer|editor] [--no-notify] [-n nb]")
+    email = rest[0]
     perm = "viewer"
     no_notify = False
     i = 1
-    while i < len(args):
-        if args[i] == "--permission":
+    while i < len(rest):
+        if rest[i] == "--permission":
             i += 1
-            if i < len(args):
-                perm = args[i]
-        elif args[i] == "--no-notify":
+            if i < len(rest):
+                perm = rest[i]
+        elif rest[i] == "--no-notify":
             no_notify = True
         i += 1
-    cmd = ["share", "add", email, "--permission", perm, "--json"]
+    cmd = ["share", "add", email, "--permission", perm, "--json"] + _nb_args(nb)
     if no_notify:
         cmd.append("--no-notify")
     out, err, rc = _run(cmd, timeout=15)
     if rc != 0:
         return _err(err or out)
-    return _ok(raw=out)
+    data = _json_or_text(out)
+    if isinstance(data, dict):
+        return _ok(email=email, permission=perm,
+                   added=bool(data.get("added", True)))
+    return _ok(email=email, raw=out)
 
 def cmd_share_remove(args):
-    if not args:
-        return _err("usage: nlm.py share remove <email>")
-    out, err, rc = _run(["share", "remove", args[0], "-y", "--json"], timeout=15)
+    nb, rest = _split_nb(args)
+    if not rest:
+        return _err("usage: nlm.py share remove <email> [-n nb]")
+    out, err, rc = _run(["share", "remove", rest[0], "-y", "--json"] + _nb_args(nb), timeout=15)
     if rc != 0:
         return _err(err or out)
-    return _ok(raw=out)
+    data = _json_or_text(out)
+    if isinstance(data, dict):
+        return _ok(email=rest[0], removed=bool(data.get("removed", True)))
+    return _ok(email=rest[0], raw=out)
 
 def cmd_share_view_level(args):
-    if not args or args[0] not in ("full", "chat"):
-        return _err("usage: nlm.py share view-level full|chat")
-    out, err, rc = _run(["share", "view-level", args[0], "--json"], timeout=15)
+    nb, rest = _split_nb(args)
+    if not rest or rest[0] not in ("full", "chat"):
+        return _err("usage: nlm.py share view-level full|chat [-n nb]")
+    out, err, rc = _run(["share", "view-level", rest[0], "--json"] + _nb_args(nb), timeout=15)
     if rc != 0:
         return _err(err or out)
+    data = _json_or_text(out)
+    if isinstance(data, dict):
+        return _ok(view_level=data.get("view_level", rest[0]))
     return _ok(raw=out)
 
 # ── history ─────────────────────────────────────────────────────
@@ -1000,6 +1241,7 @@ def cmd_history(args):
 # ── configure ───────────────────────────────────────────────────
 
 def cmd_configure(args):
+    nb, args = _split_nb(args)
     mode = None
     persona = None
     response_length = None
@@ -1018,7 +1260,12 @@ def cmd_configure(args):
             if i < len(args):
                 response_length = args[i]
         i += 1
-    cmd = ["configure", "--json"]
+    # Upstream rejects a preset combined with a custom persona/response_length;
+    # catching it here turns a raw VALIDATION_ERROR blob into a usable message.
+    if mode and mode != "default" and (persona or response_length):
+        return _err("--mode (preset) cannot be combined with --persona/--response-length. "
+                    "Use either a preset or a custom persona.")
+    cmd = ["configure", "--json"] + _nb_args(nb)
     if mode:
         cmd.extend(["--mode", mode])
     if persona:
@@ -1028,6 +1275,35 @@ def cmd_configure(args):
     out, err, rc = _run(cmd, timeout=15)
     if rc != 0:
         return _err(err or out)
+    data = _json_or_text(out)
+    if isinstance(data, dict):
+        return _ok(notebook=data.get("notebook_id") or nb or _default_nb(),
+                   mode=data.get("mode"), persona=data.get("persona"),
+                   response_length=data.get("response_length"),
+                   configured=bool(data.get("configured", True)))
+    return _ok(raw=out)
+
+def cmd_doctor(args):
+    """Session/profile health (upstream `doctor`), parsed."""
+    fix = "--fix" in args
+    cmd = ["doctor", "--json"]
+    if fix:
+        cmd.append("--fix")
+    out, err, rc = _run(cmd, timeout=60)
+    if rc != 0:
+        return _err(err or out)
+    data = _json_or_text(out)
+    if isinstance(data, dict):
+        checks = data.get("checks", {}) or {}
+        summary = {k: (v.get("status") if isinstance(v, dict) else v)
+                   for k, v in checks.items()}
+        # "warn" is advisory (e.g. headless_reauth is not installed), not a failure.
+        failing = [k for k, v in summary.items()
+                   if v not in ("pass", "ok", "skipped", "warn", None)]
+        warnings = [k for k, v in summary.items() if v == "warn"]
+        return _ok(profile=data.get("profile", PROFILE or "default"),
+                   healthy=not failing, failing=failing, warnings=warnings,
+                   checks=summary)
     return _ok(raw=out)
 
 # ── auth ────────────────────────────────────────────────────────
@@ -1055,13 +1331,6 @@ def cmd_auth_init(args):
         return _err(err or out[:500])
     last = (out or "").strip().splitlines()[-1][:200] if out else "auth stored"
     return _ok(message=last)
-
-def cmd_auth_doctor(args):
-    out, err, rc = _run(["doctor", "--json"], timeout=15)
-    if rc != 0:
-        return _err(err or out)
-    return _ok(raw=out)
-
 
 #: Google auth cookies whose staleness gates NotebookLM operations (esp. file upload).
 #: The PSID / PSIDTS family are session tokens that rotate server-side and can go
@@ -1188,6 +1457,67 @@ PASSTHROUGH_GROUPS = {
 def cmd_passthrough(group, action, action_args):
     return _forward_group(group, action, action_args, timeout=90)
 
+# ── agent-native extras: surface / selftest / batch ──────────────
+
+def cmd_surface(args):
+    """Machine-readable command map — cheap discovery for an agent (~250 tokens)."""
+    groups = {g: sorted(a.keys()) for g, a in GROUP_MAP.items()}
+    return _ok(groups=groups, passthrough=sorted(PASSTHROUGH_GROUPS),
+               aliases=ALIASES, artifact_types=ARTIFACT_TYPES,
+               notebook_flag="-n/--notebook (any position)",
+               profile_flag="--profile NAME")
+
+SELFTEST_STEPS = (
+    ("auth", ["auth", "status"]),
+    ("notebook_list", ["nb", "list"]),
+    ("status", ["nb", "status"]),
+    ("source_list", ["src", "list"]),
+    ("artifact_list", ["art", "list"]),
+    ("notes", ["notes"]),
+    ("share", ["share", "status"]),
+    ("doctor", ["doctor"]),
+)
+
+def cmd_selftest(args):
+    """Read-only readiness check: run before trusting the tool in a pipeline."""
+    only = args[0] if args else None
+    results = []
+    passed = 0
+    for name, argv in SELFTEST_STEPS:
+        if only and only != name:
+            continue
+        try:
+            d = json.loads(dispatch(argv))
+        except Exception as e:                      # pragma: no cover - defensive
+            d = {"s": "err", "e": str(e)}
+        ok = d.get("s") == "ok"
+        passed += 1 if ok else 0
+        entry = {"step": name, "ok": ok}
+        if not ok:
+            entry["e"] = str(d.get("e", ""))[:160]
+        results.append(entry)
+    return _ok(passed=passed, total=len(results), healthy=passed == len(results),
+               steps=results)
+
+def cmd_batch(args):
+    """Run several commands in one process.
+
+    `nlm.py batch "nb list" "src list -n <id>" "history -l 3"` → one JSON
+    document with a `results` array, saving N process spawns. Specs are
+    whitespace-split, so quote arguments that contain spaces inside the spec.
+    """
+    if not args:
+        return _err("usage: nlm.py batch '<cmd>' ['<cmd>' ...]")
+    out = []
+    for spec in args:
+        try:
+            d = json.loads(dispatch(spec.split()))
+        except Exception as e:
+            d = {"s": "err", "e": str(e)}
+        out.append({"cmd": spec, "ok": d.get("s") == "ok", "r": d})
+    return _ok(results=out, n=len(out),
+               n_ok=sum(1 for r in out if r["ok"]))
+
 # ── dispatch ────────────────────────────────────────────────────
 
 GROUP_MAP = {
@@ -1226,6 +1556,11 @@ GROUP_MAP = {
         "cancel": lambda a: _forward_group("research", "cancel", a),
         "import": lambda a: _forward_group("research", "import", a, timeout=300),
     },
+    "generate": {
+        # Only the odd-one-out is wrapped; the rest are reached through
+        # `artifact generate` (positional description + --wait).
+        "revise-slide": lambda a: _forward_group("generate", "revise-slide", a, timeout=600),
+    },
     "artifact": {
         "list": cmd_artifact_list,
         "generate": cmd_artifact_generate,
@@ -1260,9 +1595,16 @@ GROUP_MAP = {
     "configure": {"configure": cmd_configure},
     "auth": {
         "init": cmd_auth_init,
-        "doctor": cmd_auth_doctor,
+        "doctor": cmd_doctor,
         "status": cmd_auth_status,
+        # upstream auth surface, forwarded as-is
+        "check": lambda a: _forward_group("auth", "check", a, timeout=120),
+        "inspect": lambda a: _forward_group("auth", "inspect", a, timeout=120),
+        "logout": lambda a: _forward_group("auth", "logout", a),
+        "refresh": lambda a: _forward_group("auth", "refresh", a, timeout=120),
+        "import-cookies": lambda a: _forward_group("auth", "import-cookies", a, timeout=120),
     },
+    "doctor": {"doctor": cmd_doctor},
     "clear": {"clear": cmd_clear},
 }
 
@@ -1277,24 +1619,33 @@ ALIASES = {
     "prompt": "prompts prompts",
 }
 
-USAGE = """Usage: nlm.py <group> <action> [args...]
+USAGE = """Usage: nlm.py [--profile NAME] <group> <action> [args...]
 
 Groups:
   notebook   create, rename, delete, list, use, status, summary, metadata
   ask        <question> [-p] [-n notebook] [--new]
-  prompts    AI-suggested prompts for the notebook (--mode 1-10, --query)
-  source     list, add, add-drive, add-drive-file, guide, fulltext, get,
-             delete, delete-by-title, clean, add-research, refresh, rename,
-             stale, wait
+  prompts    AI-suggested prompts (--mode 1-10, --query, -s source)
+  source     list [--label L --status S --limit N], add, add-drive,
+             add-drive-file, guide, fulltext, get, delete, delete-by-title,
+             clean, add-research, refresh, rename, stale, wait
   research   status, wait, cancel, import
-  artifact   list, generate, download, suggestions, get, delete, export,
-             get-prompt, poll, rename, retry, wait
+  artifact   list [--type T --limit N], generate, download, suggestions, get,
+             delete, export, get-prompt, poll, rename, retry, wait
+  generate   revise-slide (remaining generate types via `artifact generate`)
   note       list, create, get, save, rename, delete
   share      status, public, add, remove, view-level, update
   history    [--save] [--json] [--limit N] [--show-all]
   configure  [--mode MODE] [--persona TEXT] [--response-length LEN]
-  auth       init [--account EMAIL] [--browser B], doctor, status [--verbose]
+  auth       init [--account EMAIL] [--browser B], status [--verbose],
+             doctor, check, inspect, logout, refresh, import-cookies
+  doctor     [--fix]        session/profile health (parsed)
+  selftest   [step]         read-only readiness battery (auth/list/status/...)
+  surface                   machine-readable command map (cheap discovery)
+  batch      '<cmd>' ...    run several commands in one process
   clear      [notebook_id]
+
+Every notebook-scoped command accepts `-n/--notebook <id>` in any position.
+`--profile NAME` (or NOTEBOOKLM_PROFILE) selects the upstream account profile.
 
 Passthrough groups (forwarded to upstream): label, collection, profile,
   language, agent, skill, mcp
@@ -1307,12 +1658,14 @@ Shorthand: nlm.py "question"  →  same as  nlm.py ask "question"
 Output: JSON with "s":"ok" or "s":"err"."""
 
 
-def main():
-    args = sys.argv[1:]
+def dispatch(args):
+    """Resolve aliases + dispatch one command, returning its JSON string.
 
+    Split out of main() so `batch` / `selftest` can reuse the exact same
+    resolution and error handling as a top-level invocation.
+    """
     if not args:
-        print(USAGE)
-        return
+        return USAGE
 
     # Resolve aliases
     first = args[0]
@@ -1327,46 +1680,65 @@ def main():
     # Single-action groups: auto-dispatch action
     single_actions = {"history": cmd_history, "configure": cmd_configure,
                       "clear": cmd_clear, "ask": cmd_ask,
-                      "prompts": cmd_suggest_prompts}
+                      "prompts": cmd_suggest_prompts, "doctor": cmd_doctor,
+                      "selftest": cmd_selftest, "surface": cmd_surface,
+                      "batch": cmd_batch}
 
     if group in single_actions:
-        print(single_actions[group](rest))
-        return
+        return single_actions[group](rest)
 
     # Passthrough groups: forward <group> <action> --json <args> upstream
     if group in PASSTHROUGH_GROUPS:
         if not rest:
-            print(_err("group '{}' requires an action.".format(group)))
-            return
+            return _err("group '{}' requires an action.".format(group))
         action = rest[0]
         action_args = rest[1:]
-        print(cmd_passthrough(group, action, action_args))
-        return
+        return cmd_passthrough(group, action, action_args)
 
     # Shorthand: any unknown group with args → treat as question
     if group not in GROUP_MAP:
-        print(cmd_ask(args))
-        return
+        return cmd_ask(args)
 
     actions = GROUP_MAP[group]
     if not rest:
         if group == "auth":
-            print(cmd_auth_status([]))
-            return
-        print(_err("group '{}' requires an action. Valid: {}".format(group, ", ".join(actions.keys()))))
-        return
+            return cmd_auth_status([])
+        return _err("group '{}' requires an action. Valid: {}".format(
+            group, ", ".join(actions.keys())))
 
     action = rest[0]
     action_args = rest[1:]
 
     if action not in actions:
-        print(_err("unknown action '{}' in group '{}'. Valid: {}".format(action, group, ", ".join(actions.keys()))))
-        return
+        return _err("unknown action '{}' in group '{}'. Valid: {}".format(
+            action, group, ", ".join(actions.keys())))
 
     try:
-        print(actions[action](action_args))
+        return actions[action](action_args)
     except Exception as e:
-        print(_err(str(e)))
+        return _err(str(e))
+
+
+def main():
+    global PROFILE
+    args = sys.argv[1:]
+
+    if not args:
+        print(USAGE)
+        return
+
+    # Global: --profile NAME (upstream account profile, must precede the command)
+    for i, a in enumerate(args):
+        if a in ("--profile", "-P") and i + 1 < len(args):
+            PROFILE = args[i + 1]
+            del args[i:i + 2]
+            break
+
+    if not args:
+        print(USAGE)
+        return
+
+    print(dispatch(args))
 
 
 if __name__ == "__main__":

@@ -123,6 +123,41 @@ AI Agent → nlm_v3.py (CLI wrapper) → notebooklm (notebooklm-py) → Google N
 - `rookiepy` — browser cookie extraction (used by `notebooklm login --browser-cookies`)
 - Firefox or Chrome signed into notebooklm.google.com
 
+## v7 changes (2026-09-20)
+
+Live testing found that most commands accepted `-n/--notebook` and then **ignored
+it**, so a request for one notebook silently answered about the *default* notebook.
+That is worse than an error: `share status -n X` reported X's sharing as if it were
+the default notebook's, and `artifact download` never passed a notebook at all.
+Every notebook-scoped command now parses and forwards `-n`, in any position.
+
+Also in v7:
+
+- `doctor [--fix]`, `selftest`, `surface`, `batch` (see below)
+- `status` / `doctor` / `configure` / share+note+source mutations return parsed
+  fields instead of a rendered table or a raw JSON string
+- filters exposed: `source list --label/--status/--limit`,
+  `artifact list --type/--limit`, `prompts -s/--source`, `--no-truncate`
+- artifact types `fantasy-map`, `file`; `generate revise-slide`
+- multi-account: `--profile NAME` (or `NOTEBOOKLM_PROFILE`), plus
+  `auth check/inspect/logout/refresh/import-cookies`
+- `NOTEBOOKLM_CLI` env / PATH lookup for the upstream binary, and
+  `NOTEBOOKLM_TRANSPORT=curl_cffi` pinned (Google rejects some transports)
+
+### Readiness + discovery commands
+
+```
+nlm.py selftest          # read-only battery: auth, list, status, sources, artifacts,
+                         # notes, share, doctor → {"passed":8,"total":8,"healthy":true}
+nlm.py surface           # machine-readable command map (~250 tokens) for agent discovery
+nlm.py batch "nb list" "src list -n <id>" "history -l 3"
+                         # several commands in ONE process → one JSON document
+nlm.py doctor            # session/profile health, parsed (warn != failure)
+```
+
+`selftest` is the cheap gate to run before a pipeline depends on this tool; it
+touches nothing destructive.
+
 ## Pitfalls
 
 - **Auth cookies go server-side-stale within ~2 weeks** (the PSID/PSIDTS session tokens are invalidated by Google regardless of their ~365-day nominal `expires`). When uploads start failing with `SourceProcessingError`, check `nlm_v3.py auth status` (or bare `auth`) and re-run `nlm_v3.py auth init --account EMAIL` / `notebooklm login --browser-cookies auto --account EMAIL`. The `source add --type file` path auto-detects a stale-session failure and falls back to pasted-text, telling you to re-login.
@@ -133,6 +168,10 @@ AI Agent → nlm_v3.py (CLI wrapper) → notebooklm (notebooklm-py) → Google N
 - **Conversation rate limit ~12 comprehensive turns.** Start a fresh conversation with `nlm.py clear`.
 - **Partial ID matching works everywhere** — `abc` matches `abc123...`.
 - `notebooklm-py` API was not affected by Google's May 2025 NotebookLM → Gemini notebook rebrand.
+
+- **`-n/--notebook` is honoured everywhere now, but `status` is the exception** — upstream `status` has no `--notebook` option (it reports the current context), so `nlm.py nb status -n X` echoes the requested id without forwarding it. Use `nb metadata -n X` or `src list -n X` when you need facts about a specific notebook.
+
+- **`--profile NAME` is global** — it is applied before the subcommand, so it works with every command (`nlm.py --profile work nb list`). Set `NOTEBOOKLM_PROFILE` to make it the default for a shell.
 
 ## Interop & UI automation
 
@@ -157,7 +196,8 @@ Two things to know if you reuse the auth state outside the CLI:
 
 | File | Purpose |
 |------|---------|
-| `nlm_v3.py` | Agent-native CLI wrapper (v5, ~1150 lines) |
+| `nlm_v3.py` | Agent-native CLI wrapper (v7, ~1750 lines) |
+| `tests/test_nlm_v3.py` | Offline unit tests (upstream CLI faked) — `python3 -m pytest tests/ -q` |
 | `nlm_v2.py` | v2 page-server client (HTTP POST, fallback) |
 | `nlm_v2_server.py` | v2 Chromium daemon (Playwright, fallback) |
 | `README.md` | This file |

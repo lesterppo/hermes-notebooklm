@@ -1,0 +1,27 @@
+name: tests
+
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      # No third-party packages: the wrapper is stdlib-only and the upstream
+      # `notebooklm` CLI is faked in the tests, so this suite runs anywhere.
+      - name: Install pytest
+        run: python -m pip install --upgrade pip pytest
+
+      - name: Compile check
+        run: python -m py_compile nlm_v3.py nlm_v2.py
+
+      - name: Unit tests (offline)
+        run: python -m pytest tests/ -q

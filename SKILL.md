@@ -1,14 +1,18 @@
 ---
 name: notebooklm-cli
-description: Query NotebookLM notebooks via nlm.py. 3-5s chat, 60+ commands across 11 groups.
-version: 5.0.0
+description: Query NotebookLM notebooks via nlm_v3.py. 3-5s chat, 80+ commands, per-notebook (-n) plumbing, selftest/surface/batch for agents.
+version: 7.0.0
 tags: [notebooklm, knowledge-extraction, agent-native, cli]
 platforms: [linux, wsl]
 ---
 
-# NotebookLM CLI (Agent-Native v5)
+# NotebookLM CLI (Agent-Native v7)
 
-Token-efficient CLI for Google NotebookLM (Gemini notebook). Pure HTTP API via `notebooklm-py` 0.8.1 — no browser, 3-5s latency, 60+ commands across 11 capability groups plus 7 passthrough groups.
+Token-efficient CLI for Google NotebookLM (Gemini notebook). Pure HTTP API via `notebooklm-py` 0.8.1 — no browser, 3-5s latency, 12 capability groups + 7 passthrough groups.
+
+**v7 headline fix:** `-n/--notebook` used to be accepted and IGNORED by most commands, so requests silently answered about the DEFAULT notebook. Every notebook-scoped command now forwards it (verified live). `status` is the one exception — upstream has no `--notebook` there.
+
+**Agent entry points:** `selftest` (read-only 8-step readiness battery), `surface` (machine-readable command map, ~250 tokens), `batch` (several commands, one process), `doctor` (parsed session health).
 
 **Script:** `nlm_v3.py` (this repo) — agent-native wrapper with structured JSON output.
 **Backend:** `notebooklm-py` (pip package) — reverse-engineered HTTP API client.
