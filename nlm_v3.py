@@ -259,7 +259,13 @@ def _forward_group(group, action, action_args, timeout=90):
 # ── notebook group ────────────────────────────────────────────
 
 def cmd_notebook_list(args):
-    out, err, rc = _run(["list", "--json"])
+    nb, rest = _split_nb(args)
+    cmd = ["list", "--json"]
+    if "--limit" in rest:
+        i = rest.index("--limit")
+        if i + 1 < len(rest):
+            cmd += ["--limit", rest[i + 1]]
+    out, err, rc = _run(cmd)
     if rc != 0:
         return _err(err or out)
     items, count = _parse_list_result(out, "notebooks", ("id", "title", "created_at"))
