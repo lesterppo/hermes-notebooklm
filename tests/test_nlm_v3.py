@@ -120,6 +120,42 @@ class TestNotebookFlagPlumbing(Base):
     def test_research_status(self):
         self.assert_nb_forwarded(lambda: nlm.cmd_research_status(["-n", "nb-other"]))
 
+    def test_notebook_copy(self):
+        self.assert_nb_forwarded(lambda: nlm.cmd_notebook_copy(["My Copy", "-n", "nb-other"]))
+
+    def test_source_search(self):
+        self.assert_nb_forwarded(lambda: nlm.cmd_source_search(["revenue", "-n", "nb-other"]))
+
+    def test_research_discover(self):
+        self.assert_nb_forwarded(lambda: nlm.cmd_research_discover(["transistors", "-n", "nb-other"]))
+
+    def test_source_add_fallback_fetch(self):
+        nlm.cmd_source_add(["--fallback-fetch", "https://example.com/x", "-n", "nb-other"])
+        argv = self.fake.argv()
+        self.assertIn("--fallback-fetch", argv)
+        self.assertIn("--notebook", argv)
+
+    def test_artifact_generate_later(self):
+        self.fake.responses = {"generate": (json.dumps({"task_id": "t1", "status": "scheduled"}), "", 0)}
+        d = json.loads(nlm.cmd_artifact_generate(["quiz", "vocab", "--later", "-n", "nb-other"]))
+        self.assertEqual(d["status"], "scheduled")
+        self.assertIn("--later", self.fake.argv())
+
+    def test_artifact_generate_later_rejects_wait(self):
+        d = json.loads(nlm.cmd_artifact_generate(["quiz", "vocab", "--later", "--wait"]))
+        self.assertEqual(d["s"], "err")
+        self.assertIn("--later", d["e"])
+
+    def test_artifact_generate_later_rejects_mind_map(self):
+        d = json.loads(nlm.cmd_artifact_generate(["mind-map", "--later"]))
+        self.assertEqual(d["s"], "err")
+        self.assertIn("--later", d["e"])
+
+    def test_artifact_generate_site_guides_to_ask(self):
+        d = json.loads(nlm.cmd_artifact_generate(["site", "a dashboard"]))
+        self.assertEqual(d["s"], "err")
+        self.assertIn("make me a site", d["e"])
+
     def test_configure(self):
         self.assert_nb_forwarded(lambda: nlm.cmd_configure(["-n", "nb-other"]))
 
