@@ -93,7 +93,10 @@ Large answers (>3000 chars) are saved to disk with a file pointer.
   `--later` + `--wait` is rejected; data-table / mind-map have no `--later`.
 - **Interactive sites (Nov 16 2026) are chat-triggered, not a generate type:**
   `ask "make me a site …"`; `gen site` fails with that guidance. A site lists
-  via `art list` as type `unknown` until upstream types it.
+  via `art list` as type `File`, status `completed`, with **no API URL** — open
+  it from the web Studio panel. Keep `NOTEBOOKLM_TRANSPORT=curl_cffi`: without
+  it, upstream 0.8.6 `artifact list`/`get` crash (`Invalid port: ':1]'`) on a
+  notebook containing a site artifact (live-verified 2026-11-19).
 - **`note create` now returns a real `id`** (fixed in notebooklm-py 0.8.1 — the
   old "id: null" bug is gone).
 - **Delete/remove commands need `-y` in JSON mode** (upstream). The wrapper
