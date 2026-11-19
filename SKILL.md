@@ -1,14 +1,16 @@
 ---
 name: notebooklm-cli
-description: Query NotebookLM notebooks via nlm_v3.py. 3-5s chat, 80+ commands, per-notebook (-n) plumbing, selftest/surface/batch for agents.
-version: 7.0.0
+description: Query NotebookLM notebooks via nlm_v3.py. 3-5s chat, 79 commands, per-notebook (-n) plumbing, selftest/surface/batch for agents.
+version: 8.0.0
 tags: [notebooklm, knowledge-extraction, agent-native, cli]
 platforms: [linux, wsl]
 ---
 
-# NotebookLM CLI (Agent-Native v7)
+# NotebookLM CLI (Agent-Native v8)
 
-Token-efficient CLI for Google NotebookLM (Gemini notebook). Pure HTTP API via `notebooklm-py` 0.8.1 — no browser, 3-5s latency, 12 capability groups + 7 passthrough groups.
+Token-efficient CLI for Google NotebookLM (Gemini notebook). Pure HTTP API via `notebooklm-py` 0.8.6 — no browser, 3-5s latency, 12 capability groups + 7 passthrough groups.
+
+**v8 headline:** upstream bumped 0.8.1 → 0.8.6 (verified against the 0.8.6 CLI help). New: `nb copy`, `src search`, `research discover`, `src add-book` / `books` / `add-async` / `append` / `copy`, `art copy` / `choices`, `usage`, `src add --fallback-fetch`, `art generate --later` (audio, video, cinematic-video, slide-deck, report, flashcards, infographic, quiz; `--later` + `--wait` rejected; data-table / mind-map have no `--later`). Interactive sites (Nov 16 2026) are chat-triggered only — see below; there is no `site` generate type in 0.8.6.
 
 **v7 headline fix:** `-n/--notebook` used to be accepted and IGNORED by most commands, so requests silently answered about the DEFAULT notebook. Every notebook-scoped command now forwards it (verified live). `status` is the one exception — upstream has no `--notebook` there.
 
@@ -21,7 +23,7 @@ Token-efficient CLI for Google NotebookLM (Gemini notebook). Pure HTTP API via `
 
 ```bash
 pipx install notebooklm-py
-pipx inject notebooklm-py rookiepy
+pipx inject notebooklm-py rookie-cookies
 notebooklm login --browser-cookies auto --account EMAIL   # cookie auth (no OAuth)
 # OR
 python3 nlm_v3.py auth init --account EMAIL
@@ -45,17 +47,18 @@ nlm_v3.py <group> <action> [args...]
 
 | Group | Alias | Commands |
 |-------|-------|----------|
-| notebook | nb | list, create, rename, delete, use, status, summary, metadata |
+| notebook | nb | list, create, copy, rename, delete, use, status, summary, metadata |
 | ask | (shorthand) | question, -p, -n, --new |
 | prompts | prompt | AI-suggested prompts (--mode 1-10, --query) |
-| source | src, ls | list, add, add-drive, add-drive-file, guide, fulltext, get, delete, delete-by-title, clean, add-research, refresh, rename, stale, wait |
-| research | — | status, wait, cancel, import |
-| artifact | art | list, generate, download, suggestions, get, delete, export, get-prompt, poll, rename, retry, wait |
+| source | src, ls | list, search, add, add-drive, add-drive-file, add-book, books, add-async, append, copy, guide, fulltext, get, delete, delete-by-title, clean, add-research, refresh, rename, stale, wait |
+| research | — | status, discover, wait, cancel, import |
+| artifact | art | list, generate, download, suggestions, get, delete, export, copy, choices, get-prompt, poll, rename, retry, wait |
 | note | notes (list) | list, create, get, save, rename, delete |
 | share | — | status, public, add, remove, view-level, update |
 | history | — | --limit, --save, --show-all |
 | configure | — | --mode, --persona, --response-length |
 | auth | — | init, doctor, status |
+| usage | — | [--categories] |
 | clear | — | (reset conversation) |
 
 **Passthrough groups** (forwarded to upstream): `label`, `collection`, `profile`,
@@ -84,8 +87,13 @@ Large answers (>3000 chars) are saved to disk with a file pointer.
 - **Auth cookies go server-side-stale within ~2 weeks** (PSID/PSIDTS tokens). Check `nlm_v3.py auth status` (or bare `auth`) and re-run `nlm_v3.py auth init --account EMAIL` when uploads fail with `SourceProcessingError`.
 - **`generate` takes a positional description** for all types EXCEPT `mind-map`,
   which uses `--instructions` + `--kind [interactive|note-backed]`. `--wait` is
-  only valid on non-mind-map types. (The old "`--instructions` for all types"
-  behavior changed in notebooklm-py 0.8.1.)
+  only valid on non-mind-map types.
+- **`art generate --later`** queues audio, video, cinematic-video, slide-deck,
+  report, flashcards, infographic, quiz for later (returns `scheduled`);
+  `--later` + `--wait` is rejected; data-table / mind-map have no `--later`.
+- **Interactive sites (Nov 16 2026) are chat-triggered, not a generate type:**
+  `ask "make me a site …"`; `gen site` fails with that guidance. A site lists
+  via `art list` as type `unknown` until upstream types it.
 - **`note create` now returns a real `id`** (fixed in notebooklm-py 0.8.1 — the
   old "id: null" bug is gone).
 - **Delete/remove commands need `-y` in JSON mode** (upstream). The wrapper
