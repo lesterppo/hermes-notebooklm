@@ -71,8 +71,9 @@ v8 (2026-11-19, notebooklm-py 0.8.6; Gemini Notebook Nov 16 interactive sites):
     upstream 0.8.6 — there is no `site`/`canvas` generate type. The feature
     is chat-triggered: `ask "make me a site …"`; `art generate site`
     now fails with that guidance instead of a bare "unknown type".
-    A generated site lists via `art list` as type `unknown` until upstream
-    types it (upstream issue #1609, Canvas variant 5).
+    Live-verified 2026-11-19: a generated site lists via `art list` as
+    type `File`, status `completed`, with no URL — open it from the web
+    Studio panel (upstream issue #1609, Canvas variant 5).
   * Rename: upstream ADR-0028 defers the dist/repo flip to gemini-notebook-py
     to a single 0.9.0 release; import `notebooklm`, NOTEBOOKLM_* env vars and
     the `notebooklm` CLI name are permanent. No rename action taken here.
@@ -939,7 +940,7 @@ def cmd_artifact_generate(args):
             "interactive sites have no `generate` type in notebooklm-py 0.8.6 "
             "(Google launched them Nov 16 2026 as a chat feature). Trigger one "
             "with: nlm.py ask -n <notebook> \"make me a site …\" — then "
-            "`nlm.py art list` to see it (it currently lists as type unknown).")
+            "`nlm.py art list` to see it (it lists as type `File`, completed, with no API URL).")
     if atype not in ARTIFACT_TYPES:
         return _err("unknown type '{}'. Valid: {}".format(atype, ", ".join(ARTIFACT_TYPES)))
     description = None
