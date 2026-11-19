@@ -137,7 +137,7 @@ groundwork). So this wrapper does not invent one:
 
 ```bash
 nlm_v3.py ask -n <notebook> "make me a site: an interactive timeline of ..."  # trigger
-nlm_v3.py art list -n <notebook>   # the site lists as type `unknown` until upstream types it
+nlm_v3.py art list -n <notebook>   # the site lists as type `File`, status `completed`, with no API URL
 nlm_v3.py gen site "..."           # fails with the ask-trigger guidance above
 ```
 
@@ -200,6 +200,13 @@ touches nothing destructive.
 ## Pitfalls
 
 - **Auth cookies go server-side-stale within ~2 weeks** (the PSID/PSIDTS session tokens are invalidated by Google regardless of their ~365-day nominal `expires`). When uploads start failing with `SourceProcessingError`, check `nlm_v3.py auth status` (or bare `auth`) and re-run `nlm_v3.py auth init --account EMAIL` / `notebooklm login --browser-cookies auto --account EMAIL`. The `source add --type file` path auto-detects a stale-session failure and falls back to pasted-text, telling you to re-login.
+- **Interactive sites are `File` artifacts with no API URL.** `art list` shows
+  the generated site as type `File`, status `completed`, with no download URL
+  — open it from the web Studio panel. And **do not drop the
+  `NOTEBOOKLM_TRANSPORT=curl_cffi` pin**: with the default transport, upstream
+  0.8.6 `artifact list` / `artifact get` crash with `Invalid port: ':1]'` on
+  a notebook that contains a site artifact (live-verified 2026-11-19); with
+  curl_cffi they work. This wrapper always pins it.
 - **`generate` takes a positional description** for every type except `mind-map`, which takes `--instructions` and `--kind [interactive|note-backed]`. `--wait` is only valid on non-mind-map types.
 - **Delete/remove commands need `-y` in JSON mode** (upstream). The wrapper passes it automatically.
 - **`clear` doesn't accept `--notebook`** — it operates on current context.
