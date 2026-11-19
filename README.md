@@ -1,14 +1,14 @@
 # Hermes NotebookLM — AI Agent Tools
 
 Token-efficient CLI tools for AI agents to interact with Google NotebookLM
-(aka **Gemini notebook**). **v5: Pure HTTP API via notebooklm-py 0.8.1. 3-5s latency. 60+ commands across 11 groups + 7 passthrough groups.**
+(aka **Gemini notebook**). **v8: Pure HTTP API via notebooklm-py 0.8.6. 79 commands across 12 groups + 7 passthrough groups.**
 
 ## Quick Start
 
 ```bash
 # Install (pipx keeps notebooklm-py in an isolated venv)
 pipx install notebooklm-py
-pipx inject notebooklm-py rookiepy        # cookie auth (browser-cookie extraction)
+pipx inject notebooklm-py rookie-cookies      # cookie auth (browser-cookie extraction)
 
 # Auth (one-time) — reads cookies from a signed-in browser (no interactive OAuth)
 notebooklm login --browser-cookies auto --account you@gmail.com
@@ -25,17 +25,18 @@ python3 nlm_v3.py "What is in this notebook?"        # Ask a question
 
 | Group | Alias | Commands |
 |-------|-------|----------|
-| `notebook` | `nb` | list, create, rename, delete, use, status, summary, metadata |
+| `notebook` | `nb` | list, create, copy, rename, delete, use, status, summary, metadata |
 | `ask` | (shorthand) | question, -p, -n, --new |
 | `prompts` | `prompt` | AI-suggested prompts (--mode 1-10, --query) |
-| `source` | `src`, `ls` | list, add, add-drive, add-drive-file, guide, fulltext, get, delete, delete-by-title, clean, add-research, refresh, rename, stale, wait |
-| `research` | — | status, wait, cancel, import |
-| `artifact` | `art` | list, generate, download, suggestions, get, delete, export, get-prompt, poll, rename, retry, wait |
+| `source` | `src`, `ls` | list, search, add, add-drive, add-drive-file, add-book, books, add-async, append, copy, guide, fulltext, get, delete, delete-by-title, clean, add-research, refresh, rename, stale, wait |
+| `research` | — | status, discover, wait, cancel, import |
+| `artifact` | `art` | list, generate, download, suggestions, get, delete, export, copy, choices, get-prompt, poll, rename, retry, wait |
 | `note` | `notes` (list) | list, create, get, save, rename, delete |
 | `share` | — | status, public, add, remove, view-level, update |
 | `history` | — | --limit, --save, --show-all |
 | `configure` | — | --mode, --persona, --response-length |
 | `auth` | — | init, doctor, status |
+| `usage` | — | [--categories] (live compute usage) |
 | `clear` | — | (reset conversation) |
 
 **Passthrough groups** (forwarded straight to upstream `notebooklm`): `label`,
@@ -114,14 +115,52 @@ nlm_v3.py prompts --mode 4                           # AI-suggested chat questio
 AI Agent → nlm_v3.py (CLI wrapper) → notebooklm (notebooklm-py) → Google NotebookLM API
 ```
 
-- **nlm_v3.py**: Agent-native subcommand wrapper (~1150 lines). Token-efficient JSON output, file pointers for large responses, partial ID matching, comprehensive error handling, and a generic passthrough for the newest upstream groups.
+- **nlm_v3.py**: Agent-native subcommand wrapper (~1900 lines). Token-efficient JSON output, file pointers for large responses, partial ID matching, comprehensive error handling, and a generic passthrough for the newest upstream groups.
 - **notebooklm**: Upstream `notebooklm-py` CLI. Raw table output, interactive prompts. Use directly for exploratory work; use nlm_v3.py for agent automation.
 
 ## Dependencies
 
-- `notebooklm-py` >= 0.8.1 — handles the batchexecute/RPC API internally
-- `rookiepy` — browser cookie extraction (used by `notebooklm login --browser-cookies`)
-- Firefox or Chrome signed into notebooklm.google.com
+- `notebooklm-py` >= 0.8.6 — handles the batchexecute/RPC API internally
+- `rookie-cookies` — browser cookie extraction (used by `notebooklm login --browser-cookies`)
+- Firefox or Chrome signed into notebook.google.com
+
+## Interactive sites (Gemini Notebook, Nov 16 2026)
+
+Google launched interactive websites on Nov 16 2026: type **"make me a site"**
+in a notebook's chat and describe it — visual explainers (interactive periodic
+table, timeline), dashboards (quarterly sales), or project trackers. Web only,
+18+, rolling out globally (up to 15 days from Nov 16); mobile coming soon.
+
+There is **no typed artifact for it in notebooklm-py 0.8.6** (no `site` /
+`canvas` generate type; upstream issue #1609 tracks the Canvas variant-5
+groundwork). So this wrapper does not invent one:
+
+```bash
+nlm_v3.py ask -n <notebook> "make me a site: an interactive timeline of ..."  # trigger
+nlm_v3.py art list -n <notebook>   # the site lists as type `unknown` until upstream types it
+nlm_v3.py gen site "..."           # fails with the ask-trigger guidance above
+```
+
+Sharing a site by link requires viewers to have access to the **full notebook**;
+public sharing needs a consumer Google account.
+
+## v8 changes (2026-11-19)
+
+Live-verified against upstream `notebooklm-py` 0.8.6 CLI help (not just the
+changelog):
+
+- Pinned upstream 0.8.1 → 0.8.6; `rookiepy` → `rookie-cookies`.
+- New: `nb copy`, `src search`, `research discover`, `src add-book` /
+  `books` / `add-async` / `append` / `copy`, `art copy` / `choices`, `usage`.
+- `src add --fallback-fetch` / `--cleanup-on-failure` (0.8.4).
+- `art generate --later` for audio, video, cinematic-video, slide-deck,
+  report, flashcards, infographic, quiz (0.8.6 deferred generation; returns
+  status `scheduled`; `--later` + `--wait` rejected; data-table / mind-map
+  have no `--later` in 0.8.6).
+- Interactive sites documented as chat-triggered (above); no invented type.
+- Rename: upstream ADR-0028 defers the `gemini-notebook-py` dist/repo flip
+  to a single 0.9.0 release; `import notebooklm`, `NOTEBOOKLM_*` env vars
+  and the `notebooklm` CLI name are permanent — no rename action taken.
 
 ## v7 changes (2026-09-20)
 
@@ -167,7 +206,7 @@ touches nothing destructive.
 - **Source `fulltext` for image-based PDFs returns Google image URLs, not extracted text.** Use AI chat for distilled knowledge.
 - **Conversation rate limit ~12 comprehensive turns.** Start a fresh conversation with `nlm.py clear`.
 - **Partial ID matching works everywhere** — `abc` matches `abc123...`.
-- `notebooklm-py` API was not affected by Google's May 2025 NotebookLM → Gemini notebook rebrand.
+- `notebooklm-py` API was not affected by Google's July 2026 NotebookLM → Gemini Notebook rebrand (wire protocol unchanged; old notebooklm.google.com redirects to notebook.google.com).
 
 - **`-n/--notebook` is honoured everywhere now, but `status` is the exception** — upstream `status` has no `--notebook` option (it reports the current context), so `nlm.py nb status -n X` echoes the requested id without forwarding it. Use `nb metadata -n X` or `src list -n X` when you need facts about a specific notebook.
 
@@ -178,7 +217,7 @@ touches nothing destructive.
 Two things to know if you reuse the auth state outside the CLI:
 
 - **`storage_state.json` has millisecond `expires` timestamps** (upstream `notebooklm-py`
-  bug — rookiepy returns ms, `_cookie_persistence.py` stores it verbatim). ~76/108
+  bug — rookie-cookies returns ms, `_cookie_persistence.py` stores it verbatim). ~76/108
   cookies carry 13-digit values. Playwright rejects these ("Cookie should have a valid
   expires"). The CLI is unaffected (it reads the field itself); it only breaks direct
   Playwright reuse. Workaround: for any `expires > 253402300799` (year 9999 in seconds),
