@@ -56,7 +56,28 @@ v7 (2026-09-20):
     import-cookies` now pass through.
   * `NOTEBOOKLM_CLI` env / PATH lookup for the upstream binary (CI-safe),
     `NOTEBOOKLM_TRANSPORT=curl_cffi` pinned (Google rejects some transports).
+
+v8 (2026-11-19, notebooklm-py 0.8.6; Gemini Notebook Nov 16 interactive sites):
+  * Pinned upstream notebooklm-py 0.8.1 -> 0.8.6; cookie extra rookiepy ->
+    rookie-cookies (upstream #2162).
+  * New commands: `nb copy`, `src search`, `research discover`,
+    `src add-book` / `src books` / `src add-async` / `src append` /
+    `src copy`, `art copy` / `art choices`, `usage`.
+  * `src add --fallback-fetch` / `--cleanup-on-failure` passthrough (0.8.4).
+  * `art generate --later` for audio, video, cinematic-video, slide-deck,
+    report, flashcards, infographic, quiz (0.8.6 deferred generation;
+    --later + --wait rejected; data-table / mind-map have no --later).
+  * Interactive sites (Google, Nov 16 2026): NOT a typed artifact in
+    upstream 0.8.6 — there is no `site`/`canvas` generate type. The feature
+    is chat-triggered: `ask "make me a site …"`; `art generate site`
+    now fails with that guidance instead of a bare "unknown type".
+    A generated site lists via `art list` as type `unknown` until upstream
+    types it (upstream issue #1609, Canvas variant 5).
+  * Rename: upstream ADR-0028 defers the dist/repo flip to gemini-notebook-py
+    to a single 0.9.0 release; import `notebooklm`, NOTEBOOKLM_* env vars and
+    the `notebooklm` CLI name are permanent. No rename action taken here.
 """
+
 import sys, os, json, subprocess, pathlib, re, time
 import shutil
 
@@ -312,6 +333,26 @@ def _resolve_nb_id(partial):
             return nb["id"]
     return partial
 
+
+def cmd_notebook_copy(args):
+    """Copy a notebook incl. sources + Studio artifacts (upstream 0.8.2)."""
+    nb, rest = _split_nb(args)
+    use_flag = "--use" in rest
+    title_parts = [a for a in rest if a != "--use"]
+    if not title_parts:
+        return _err("usage: nlm.py notebook copy <title> [-n nb] [--use]")
+    cmd = ["copy", "--json", " ".join(title_parts)] + _nb_args(nb)
+    if use_flag:
+        cmd.append("--use")
+    out, err, rc = _run(cmd, timeout=120)
+    if rc != 0:
+        return _err(err or out)
+    data = _json_or_text(out)
+    if isinstance(data, dict):
+        nbk = _unwrap(data, "notebook")
+        return _ok(id=nbk.get("id", data.get("id", "")),
+                   title=nbk.get("title", " ".join(title_parts)))
+    return _ok(raw=out)
 
 def cmd_notebook_use(args):
     nb, rest = _split_nb(args)
@@ -581,13 +622,54 @@ def _add_file_with_fallback(path, title=None, nb=None):
                note="binary upload errored (stale NotebookLM cookies); re-login with `nlm.py auth init`; added as extracted text")
 
 
+def cmd_source_search(args):
+    """Search ranked passages across notebook sources (upstream 0.8.2)."""
+    nb, rest = _split_nb(args)
+    sources = []
+    limit = None
+    query_parts = []
+    i = 0
+    while i < len(rest):
+        if rest[i] in ("-s", "--source"):
+            i += 1
+            if i < len(rest):
+                sources.append(rest[i])
+        elif rest[i] == "--limit":
+            i += 1
+            if i < len(rest):
+                limit = rest[i]
+        else:
+            query_parts.append(rest[i])
+        i += 1
+    if not query_parts:
+        return _err("usage: nlm.py source search <query> [-s source] [--limit N] [-n nb]")
+    cmd = ["source", "search", "--json"]
+    for s in sources:
+        cmd.extend(["--source", s])
+    if limit:
+        cmd.extend(["--limit", limit])
+    cmd.extend(_nb_args(nb))
+    cmd.append(" ".join(query_parts))
+    out, err, rc = _run(cmd, timeout=60)
+    if rc != 0:
+        return _err(err or out)
+    data = _json_or_text(out)
+    if isinstance(data, dict):
+        items = data.get("results", data.get("passages", []))
+        return _ok(results=items, n=len(items) if isinstance(items, list) else 0)
+    if isinstance(data, list):
+        return _ok(results=data, n=len(data))
+    return _ok(raw=out)
+
 def cmd_source_add(args):
-    usage = "usage: nlm.py source add [--type url|text|file|youtube] [--title T] [-n nb] <value>"
+    usage = "usage: nlm.py source add [--type url|text|file|youtube] [--title T] [--fallback-fetch] [--cleanup-on-failure] [-n nb] <value>"
     if not args:
         return _err(usage)
     nb, args = _split_nb(args)
     stype = None
     title = None
+    fallback_fetch = "--fallback-fetch" in args
+    cleanup_on_failure = "--cleanup-on-failure" in args
     value_parts = []
     i = 0
     while i < len(args):
@@ -599,6 +681,8 @@ def cmd_source_add(args):
             i += 1
             if i < len(args):
                 title = args[i]
+        elif args[i] in ("--fallback-fetch", "--cleanup-on-failure"):
+            pass  # handled above
         else:
             value_parts.append(args[i])
         i += 1
@@ -616,6 +700,10 @@ def cmd_source_add(args):
         cmd.extend(["--type", stype])
     if title:
         cmd.extend(["--title", title])
+    if fallback_fetch:
+        cmd.append("--fallback-fetch")
+    if cleanup_on_failure:
+        cmd.append("--cleanup-on-failure")
     cmd.extend(_nb_args(nb))
     cmd.append(value)
     out, err, rc = _run(cmd, timeout=120)
@@ -769,6 +857,39 @@ def cmd_research_wait(args):
                    n_sources=len(data.get("sources", []) or []))
     return _ok(raw=out)
 
+def cmd_research_discover(args):
+    """Synchronous web-source discovery for a query (upstream 0.8.2).
+
+    Unlike `source add-research`, this blocks for one round trip (~8s) and
+    prints ranked sources + the backend's overview. The run id it returns
+    works with `research import`.
+    """
+    nb, rest = _split_nb(args)
+    mode = None
+    query_parts = []
+    i = 0
+    while i < len(rest):
+        if rest[i] == "--mode":
+            i += 1
+            if i < len(rest):
+                mode = rest[i]
+        else:
+            query_parts.append(rest[i])
+        i += 1
+    cmd = ["research", "discover", "--json"]
+    if mode:
+        cmd.extend(["--mode", mode])
+    cmd.extend(_nb_args(nb))
+    if query_parts:
+        cmd.append(" ".join(query_parts))
+    out, err, rc = _run(cmd, timeout=120)
+    if rc != 0:
+        return _err(err or out[:500])
+    data = _json_or_text(out)
+    if isinstance(data, (dict, list)):
+        return _ok(result=data)
+    return _ok(raw=out)
+
 # ── artifact group ─────────────────────────────────────────────
 
 ARTIFACT_TYPES = [
@@ -794,14 +915,31 @@ def cmd_artifact_list(args):
     items, count = _parse_list_result(out, "artifacts", ("id", "title", "type", "status", "created_at"))
     return _ok(artifacts=items, n=count)
 
+LATER_TYPES = {
+    # Deferred generation (upstream 0.8.6 --later). data-table / mind-map
+    # have no --later in 0.8.6 — verified against `generate <type> --help`.
+    "audio", "video", "cinematic-video", "slide-deck", "report",
+    "flashcards", "infographic", "quiz",
+}
+
+# Interactive sites (Google, Nov 16 2026) have no typed generate path in
+# upstream 0.8.6 — they are triggered from chat. Reject with guidance.
+SITE_TYPES = {"site", "website", "canvas", "interactive-site", "web-site"}
+
 def cmd_artifact_generate(args):
     usage = ("usage: nlm.py artifact generate <type> [<description>] "
              "[--instructions <text>] [--format F] [--length L] [--language L] "
-             "[--wait] [-n notebook]\n"
+             "[--wait] [--later] [-n notebook]\n"
              "types: {}".format(", ".join(ARTIFACT_TYPES)))
     if not args:
         return _err(usage)
     atype = args[0]
+    if atype in SITE_TYPES:
+        return _err(
+            "interactive sites have no `generate` type in notebooklm-py 0.8.6 "
+            "(Google launched them Nov 16 2026 as a chat feature). Trigger one "
+            "with: nlm.py ask -n <notebook> \"make me a site …\" — then "
+            "`nlm.py art list` to see it (it currently lists as type unknown).")
     if atype not in ARTIFACT_TYPES:
         return _err("unknown type '{}'. Valid: {}".format(atype, ", ".join(ARTIFACT_TYPES)))
     description = None
@@ -811,6 +949,7 @@ def cmd_artifact_generate(args):
     kind = None
     append_text = None
     wait_flag = False
+    later_flag = False
     nb = None
     i = 1
     while i < len(args):
@@ -840,14 +979,23 @@ def cmd_artifact_generate(args):
                 append_text = args[i]
         elif args[i] == "--wait":
             wait_flag = True
+        elif args[i] == "--later":
+            later_flag = True
         elif args[i] in ("-n", "--notebook"):
             i += 1
             if i < len(args):
                 nb = args[i]
         else:
-            # positional description (notebooklm-py 0.8.1 API for most types)
+            # positional description (notebooklm-py API for most types)
             description = (description + " " + args[i]).strip() if description else args[i]
         i += 1
+
+    if later_flag and wait_flag:
+        return _err("--later cannot be combined with --wait (upstream rejects it); "
+                    "a deferred generation returns status 'scheduled' — poll it with `art list` / `art wait`.")
+    if later_flag and atype not in LATER_TYPES:
+        return _err("--later is not supported for '{}' in notebooklm-py 0.8.6 "
+                    "(supported: {}).".format(atype, ", ".join(sorted(LATER_TYPES))))
 
     cmd = ["generate", atype, "--json"]
     # `mind-map` is the one type whose prompt is a FLAG (`--instructions`), not a
@@ -871,6 +1019,8 @@ def cmd_artifact_generate(args):
             cmd.extend(["--language", language])
         if append_text:
             cmd.extend(["--append", append_text])
+        if later_flag:
+            cmd.append("--later")
         if wait_flag:
             cmd.append("--wait")
     cmd.extend(_nb_args(nb))
@@ -1315,7 +1465,7 @@ def cmd_doctor(args):
 # ── auth ────────────────────────────────────────────────────────
 
 def cmd_auth_init(args):
-    """Refresh auth. Prefers upstream `login --browser-cookies` (rookiepy)."""
+    """Refresh auth. Prefers upstream `login --browser-cookies` (rookie-cookies)."""
     account = None
     browser = "auto"
     i = 0
@@ -1446,6 +1596,19 @@ def cmd_auth_status(args):
         ]
     return _ok(**res)
 
+def cmd_usage(args):
+    """Live compute usage for the current account (upstream top-level)."""
+    cmd = ["usage", "--json"]
+    if "--categories" in args or "--actions" in args:
+        cmd.append("--categories")
+    out, err, rc = _run(cmd, timeout=60)
+    if rc != 0:
+        return _err(err or out)
+    data = _json_or_text(out)
+    if isinstance(data, (dict, list)):
+        return _ok(result=data)
+    return _ok(raw=out)
+
 # ── clear ───────────────────────────────────────────────────────
 
 def cmd_clear(args):
@@ -1530,6 +1693,7 @@ GROUP_MAP = {
     "notebook": {
         "list": cmd_notebook_list,
         "create": cmd_notebook_create,
+        "copy": cmd_notebook_copy,
         "rename": cmd_notebook_rename,
         "delete": cmd_notebook_delete,
         "use": cmd_notebook_use,
@@ -1541,9 +1705,15 @@ GROUP_MAP = {
     "prompts": {"prompts": cmd_suggest_prompts},
     "source": {
         "list": cmd_source_list,
+        "search": cmd_source_search,
         "add": cmd_source_add,
         "add-drive": lambda a: _forward_group("source", "add-drive", a, timeout=120),
         "add-drive-file": lambda a: _forward_group("source", "add-drive-file", a, timeout=120),
+        "add-book": lambda a: _forward_group("source", "add-book", a, timeout=120),
+        "books": lambda a: _forward_group("source", "books", a),
+        "add-async": lambda a: _forward_group("source", "add-async", a, timeout=120),
+        "append": lambda a: _forward_group("source", "append", a, timeout=120),
+        "copy": lambda a: _forward_group("source", "copy", a, timeout=120),
         "guide": cmd_source_guide,
         "fulltext": cmd_source_fulltext,
         "get": cmd_source_get,
@@ -1558,6 +1728,7 @@ GROUP_MAP = {
     },
     "research": {
         "status": cmd_research_status,
+        "discover": cmd_research_discover,
         "wait": cmd_research_wait,
         "cancel": lambda a: _forward_group("research", "cancel", a),
         "import": lambda a: _forward_group("research", "import", a, timeout=300),
@@ -1575,6 +1746,8 @@ GROUP_MAP = {
         "get": cmd_artifact_get,
         "delete": cmd_artifact_delete,
         "export": lambda a: _forward_group("artifact", "export", a, timeout=120),
+        "copy": lambda a: _forward_group("artifact", "copy", a, timeout=120),
+        "choices": lambda a: _forward_group("artifact", "choices", a),
         "get-prompt": lambda a: _forward_group("artifact", "get-prompt", a),
         "poll": lambda a: _forward_group("artifact", "poll", a),
         "rename": lambda a: _forward_group("artifact", "rename", a),
@@ -1628,16 +1801,18 @@ ALIASES = {
 USAGE = """Usage: nlm.py [--profile NAME] <group> <action> [args...]
 
 Groups:
-  notebook   create, rename, delete, list, use, status, summary, metadata
+  notebook   create, copy, rename, delete, list, use, status, summary, metadata
   ask        <question> [-p] [-n notebook] [--new]
   prompts    AI-suggested prompts (--mode 1-10, --query, -s source)
-  source     list [--label L --status S --limit N], add, add-drive,
-             add-drive-file, guide, fulltext, get, delete, delete-by-title,
-             clean, add-research, refresh, rename, stale, wait
-  research   status, wait, cancel, import
-  artifact   list [--type T --limit N], generate, download, suggestions, get,
-             delete, export, get-prompt, poll, rename, retry, wait
+  source     list, search, add [--fallback-fetch], add-drive,
+             add-drive-file, add-book, books, add-async, append, copy,
+             guide, fulltext, get, delete, delete-by-title, clean,
+             add-research, refresh, rename, stale, wait
+  research   status, discover, wait, cancel, import
+  artifact   list [--type T --limit N], generate [--later], download, suggestions, get,
+             delete, export, copy, choices, get-prompt, poll, rename, retry, wait
   generate   revise-slide (remaining generate types via `artifact generate`)
+  usage      [--categories]  live compute usage for the account
   note       list, create, get, save, rename, delete
   share      status, public, add, remove, view-level, update
   history    [--save] [--json] [--limit N] [--show-all]
@@ -1688,7 +1863,7 @@ def dispatch(args):
                       "clear": cmd_clear, "ask": cmd_ask,
                       "prompts": cmd_suggest_prompts, "doctor": cmd_doctor,
                       "selftest": cmd_selftest, "surface": cmd_surface,
-                      "batch": cmd_batch}
+                      "batch": cmd_batch, "usage": cmd_usage}
 
     if group in single_actions:
         return single_actions[group](rest)
